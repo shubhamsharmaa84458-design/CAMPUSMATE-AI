@@ -58,6 +58,33 @@ function loadAllUsers() {
 function saveAllUsers(obj) { fs.writeFileSync(USERS_FILE, JSON.stringify(obj, null, 2), 'utf8'); }
 function loadAllMessages() { try { return JSON.parse(fs.readFileSync(MESSAGES_FILE, 'utf8') || '{}'); } catch { return {}; } }
 function saveAllMessages(obj) { fs.writeFileSync(MESSAGES_FILE, JSON.stringify(obj, null, 2), 'utf8'); }
+function loadQuizHistory() { try { return JSON.parse(fs.readFileSync(QUIZ_HISTORY_FILE, 'utf8') || '{}'); } catch { return {}; } }
+function saveQuizHistory(history) { fs.writeFileSync(QUIZ_HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8'); }
+
+async function parseSyllabus(buffer) {
+  const parser = new PDFParse({ data: buffer });
+  try {
+    const result = await parser.getText();
+    const lines = result.text.split(/\r?\n/).map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    const subjects = [];
+    const seen = new Set();
+    for (const line of lines) {
+      if (line.length < 4 || line.length > 120 || /^\d+$/.test(line)) continue;
+      const normalized = line.replace(/^(unit|module|subject|course)\s*[-:.\d]*/i, '').trim();
+      if (!normalized || /^(syllabus|semester|university|b\.?tech|department|credits?)\b/i.test(normalized)) continue;
+      if (!/[A-Za-z]{3}/.test(normalized) || /[,:;|]/.test(normalized)) continue;
+      const key = normalized.toLowerCase();
+      if (seen.has(key) || /^(introduction|objectives|references|total|elective|lecture|tutorial)\b/i.test(normalized)) continue;
+      seen.add(key);
+      subjects.push({ id: `pdf-${subjects.length + 1}`, name: normalized, code: '', topics: [{ id: `pdf-topic-${subjects.length + 1}`, name: normalized, mastery: 0 }] });
+      if (subjects.length >= 30) break;
+    }
+    if (!subjects.length) throw new Error('No subject names could be found in this PDF.');
+    return subjects;
+  } finally {
+    await parser.destroy();
+  }
+}
 
 // Database integration (optional). If DATABASE_URL is set the server will use Postgres for users/messages.
 let dbClient = null;
@@ -121,8 +148,6 @@ async function saveMessagesForEmail(email, chat) {
     await dbClient.query('INSERT INTO messages(email, chat, updated_at) VALUES($1,$2,NOW()) ON CONFLICT (email) DO UPDATE SET chat = $2, updated_at = NOW()', [key, JSON.stringify(chat)]);
     return;
   }
-  function loadQuizHistory() { try { return JSON.parse(fs.readFileSync(QUIZ_HISTORY_FILE, 'utf8') || '{}'); } catch { return {}; } }
-  function saveQuizHistory(history) { fs.writeFileSync(QUIZ_HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8'); }
   const all = loadAllMessages();
   all[key] = chat;
   saveAllMessages(all);
@@ -136,30 +161,6 @@ async function loadMessagesForEmail(email) {
     return r.rows[0].chat || [];
   }
 
-  async function parseSyllabus(buffer) {
-    const parser = new PDFParse({ data: buffer });
-    try {
-      const result = await parser.getText();
-      const lines = result.text.split(/\r?\n/).map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
-      const subjects = [];
-      const seen = new Set();
-      for (const line of lines) {
-        if (line.length < 4 || line.length > 120 || /^\d+$/.test(line)) continue;
-        const normalized = line.replace(/^(unit|module|subject|course)\s*[-:.\d]*/i, '').trim();
-        if (!normalized || /^(syllabus|semester|university|b\.?tech|department|credits?)\b/i.test(normalized)) continue;
-        if (!/[A-Za-z]{3}/.test(normalized) || /[,:;|]/.test(normalized)) continue;
-        const key = normalized.toLowerCase();
-        if (seen.has(key) || /^(introduction|objectives|references|total|elective|lecture|tutorial)\b/i.test(normalized)) continue;
-        seen.add(key);
-        subjects.push({ id: `pdf-${subjects.length + 1}`, name: normalized, code: '', topics: [{ id: `pdf-topic-${subjects.length + 1}`, name: normalized, mastery: 0 }] });
-        if (subjects.length >= 30) break;
-      }
-      if (!subjects.length) throw new Error('No subject names could be found in this PDF.');
-      return subjects;
-    } finally {
-      await parser.destroy();
-    }
-  }
   const all = loadAllMessages();
   return all[key] || [];
 }
@@ -411,7 +412,8 @@ app.post('/api/ai', authMiddleware, async (req, res) => {
   }
 });
 
-// Simulated streaming endpoint for local testing (does not call OpenAI). Useful when OPENAI_API_KEY is not set.
+// Simulated streaming endpoint for local testing (does not call OpenAI).
+// Useful when OPENAI_API_KEY is not set.
 app.post('/api/ai-stream-sim', authMiddleware, async (req, res) => {
   try {
     const { prompt } = req.body || {};
