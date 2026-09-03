@@ -17,6 +17,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, '.env') });
 
 const app = express();
+app.set('trust proxy', 1);
 const projectRoot = path.resolve(__dirname, '..');
 app.use(cors({ origin: process.env.CLIENT_ORIGIN ? process.env.CLIENT_ORIGIN.split(',').map((v) => v.trim()) : true }));
 app.use(express.json());
@@ -65,15 +66,26 @@ async function parseSyllabus(buffer) {
   const parser = new PDFParse({ data: buffer });
   try {
     const result = await parser.getText();
-    const lines = result.text.split(/\r?\n/).map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    const lines = result.text
+      .split(/\r?\n/)
+      .flatMap((line) => line.split(/\s{2,}|\t/))
+      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
     const subjects = [];
     const seen = new Set();
     for (const line of lines) {
       if (line.length < 4 || line.length > 120 || /^\d+$/.test(line)) continue;
-      const normalized = line.replace(/^(unit|module|subject|course)\s*[-:.\d]*/i, '').trim();
+      const normalized = line
+        .replace(/^(unit|module|subject|course)\s*[-:.\d]*/i, '')
+        .replace(/^\s*(?:\d+[\s.)-]+)+/, '')
+        .replace(/^\s*[A-Z]{2,}(?:[-\s]?\d{2,4})\s*[:.)-]?\s*/i, '')
+        .replace(/\s+(?:credits?|hrs?|hours?)\s*[:.-]?\s*\d+(?:\.\d+)?\s*$/i, '')
+        .replace(/\s+/g, ' ')
+        .trim();
       if (!normalized || /^(syllabus|semester|university|b\.?tech|department|credits?)\b/i.test(normalized)) continue;
-      if (!/[A-Za-z]{3}/.test(normalized) || /[,:;|]/.test(normalized)) continue;
-      const key = normalized.toLowerCase();
+      if (!/[A-Za-z]{3}/.test(normalized) || /https?:\/\//i.test(normalized)) continue;
+      if (/^(introduction|objectives|references|total|elective|lecture|tutorial|course outcomes?)\b/i.test(normalized)) continue;
+      const key = normalized.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
       if (seen.has(key) || /^(introduction|objectives|references|total|elective|lecture|tutorial)\b/i.test(normalized)) continue;
       seen.add(key);
       subjects.push({ id: `pdf-${subjects.length + 1}`, name: normalized, code: '', topics: [{ id: `pdf-topic-${subjects.length + 1}`, name: normalized, mastery: 0 }] });
