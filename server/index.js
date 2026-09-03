@@ -32,7 +32,7 @@ const hasOpenAIKey = Boolean(OPENAI_KEY && !OPENAI_KEY.startsWith('replace-with-
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const hasGeminiKey = Boolean(GEMINI_KEY && !GEMINI_KEY.startsWith('replace-with-'));
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET || JWT_SECRET.length < 32) {
   console.error("JWT_SECRET must be set to a random value of at least 32 characters.");
@@ -65,8 +65,14 @@ function saveQuizHistory(history) { fs.writeFileSync(QUIZ_HISTORY_FILE, JSON.str
 async function parseSyllabus(buffer) {
   const parser = new PDFParse({ data: buffer });
   try {
-    const result = await parser.getText();
-    const lines = result.text
+    let result;
+    try {
+      result = await parser.getText();
+    } catch (error) {
+      console.error('Syllabus PDF text extraction failed:', error);
+      return [];
+    }
+    const lines = (result?.text || '')
       .split(/\r?\n/)
       .flatMap((line) => line.split(/\s{2,}|\t/))
       .map((line) => line.replace(/\s+/g, ' ').trim())
@@ -91,8 +97,22 @@ async function parseSyllabus(buffer) {
       subjects.push({ id: `pdf-${subjects.length + 1}`, name: normalized, code: '', topics: [{ id: `pdf-topic-${subjects.length + 1}`, name: normalized, mastery: 0 }] });
       if (subjects.length >= 30) break;
     }
-    if (!subjects.length) throw new Error('No subject names could be found in this PDF.');
+    if (!subjects.length) {
+      for (const line of lines) {
+        const match = line.match(/^\s*([A-Z]{2,}(?:[-\s]?\d{2,4}))\s*[:.)-]?\s+(.{4,120})$/i);
+        if (!match) continue;
+        const normalized = match[2].replace(/\s+/g, ' ').trim();
+        const key = normalized.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        if (!normalized || seen.has(key) || /https?:\/\//i.test(normalized)) continue;
+        seen.add(key);
+        subjects.push({ id: `pdf-${subjects.length + 1}`, name: normalized, code: match[1].toUpperCase(), topics: [{ id: `pdf-topic-${subjects.length + 1}`, name: normalized, mastery: 0 }] });
+        if (subjects.length >= 30) break;
+      }
+    }
     return subjects;
+  } catch (error) {
+    console.error('Syllabus parsing failed:', error);
+    return [];
   } finally {
     await parser.destroy();
   }
@@ -245,7 +265,10 @@ app.post('/api/register', upload.single('syllabus'), async (req, res) => {
     const existing = await getUserByEmail(key);
     if (existing) return res.status(400).json({ error: 'User exists' });
     const hash = await bcrypt.hash(password, 10);
-    const subjects = req.file ? await parseSyllabus(req.file.buffer) : [];
+    const subjects = req.file ? await parseSyllabus(req.file.buffer).catch((error) => {
+      console.error('Syllabus parsing failed during registration:', error);
+      return [];
+    }) : [];
     const created = await createUserRecord(key, name.trim(), course.trim(), subjects, hash);
     const token = signToken(created);
     return res.json({ token, user: { email: created.email, name: created.name, course: created.course, subjects: created.subjects } });
@@ -522,18 +545,26 @@ app.post('/api/ai-v2', authMiddleware, async (req, res) => {
     // Prefer Anthropic if configured
     if (process.env.ANTHROPIC_API_KEY) {
       try {
-        const anthropicPrompt = `\n\nHuman: ${prompt}\n\nAssistant:`;
-        const resp = await fetch('https://api.anthropic.com/v1/complete', {
+        const resp = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY },
-          body: JSON.stringify({ model: 'claude-2', prompt: anthropicPrompt, max_tokens_to_sample: 500 })
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': process.env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: 'claude-sonnet-5',
+            max_tokens: 500,
+            system: systemMsg,
+            messages: [{ role: 'user', content: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }],
+          }),
         });
         if (!resp.ok) {
           const body = await resp.text();
           return res.status(502).json({ error: 'Anthropic API error', status: resp.status, body });
         }
         const payload = await resp.json();
-        const reply = payload?.completion || payload?.completion_text || '';
+        const reply = payload?.content?.map((block) => block?.text || '').join('').trim() || '';
         return res.json({ reply });
       } catch (e) {
         console.error('Anthropic error', e);
@@ -619,11 +650,20 @@ app.post('/api/ai-stream-v2', authMiddleware, async (req, res) => {
       finalReply = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
     } else if (process.env.ANTHROPIC_API_KEY) {
       try {
-        const anthropicPrompt = `\n\nHuman: ${prompt}\n\nAssistant:`;
-        const resp = await fetch('https://api.anthropic.com/v1/complete', {
+        const systemMsg = `You are CampusMate AI, a helpful study assistant aware of the user's tracked subjects, weak topics, and planner.`;
+        const resp = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY },
-          body: JSON.stringify({ model: 'claude-2', prompt: anthropicPrompt, max_tokens_to_sample: 500 })
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': process.env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: 'claude-sonnet-5',
+            max_tokens: 500,
+            system: systemMsg,
+            messages: [{ role: 'user', content: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }],
+          }),
         });
         if (!resp.ok) {
           const body = await resp.text();
@@ -631,7 +671,7 @@ app.post('/api/ai-stream-v2', authMiddleware, async (req, res) => {
           return res.end();
         }
         const payload = await resp.json();
-        finalReply = payload?.completion || '';
+        finalReply = payload?.content?.map((block) => block?.text || '').join('').trim() || '';
       } catch (e) {
         console.error('Anthropic error', e);
         res.write(`data: ${JSON.stringify({ type: 'error', body: 'Anthropic call failed' })}\n\n`);
