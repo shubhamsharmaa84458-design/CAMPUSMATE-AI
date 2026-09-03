@@ -416,6 +416,14 @@ function Sidebar({ view, setView, user, logout }) {
             <LogOut size={15} />
             Logout
           </button>
+
+          <div className="founder-credit">
+            <strong>Founder</strong>
+            <span>Shubham Sharma</span>
+            <a href="mailto:shubhamsharmaa84458@gmail.com">
+              shubhamsharmaa84458@gmail.com
+            </a>
+          </div>
         </div>
       </aside>
     </>
