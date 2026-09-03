@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>SSE Debug - CampusMate AI</title>
+  <style>
+    body{font-family:Arial;margin:20px}
+    #log{white-space:pre-wrap;border:1px solid #ddd;padding:12px;height:400px;overflow:auto}
+    input,button{padding:8px;margin:4px}
+  </style>
+</head>
+<body>
+  <h1>SSE Streaming Debug</h1>
+  <p>Enter prompt and click Stream — shows raw SSE data forwarded from /api/ai-stream.</p>
+  <input id="prompt" style="width:60%" placeholder="Ask something..." />
+  <button id="go">Stream</button>
+  <div id="log"></div>
+
+  <script>
+    async function streamPrompt(prompt){
+      const log = document.getElementById('log');
+      log.textContent = '';
+      const resp = await fetch('/api/ai-stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, context: {} })
+      });
+
+      if (!resp.ok) {
+        log.textContent = 'Error: ' + (await resp.text());
+        return;
+      }
+
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        log.textContent += buf;
+        log.scrollTop = log.scrollHeight;
+        buf = '';
+      }
+      log.textContent += '\n-- stream ended --';
+    }
+
+    document.getElementById('go').onclick = () => {
+      const p = document.getElementById('prompt').value || 'Hello from debug';
+      streamPrompt(p).catch(e=>document.getElementById('log').textContent = e.toString());
+    };
+  </script>
+</body>
+</html>

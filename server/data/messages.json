@@ -1,0 +1,196 @@
+﻿{
+    "student@example.com":  [
+                                {
+                                    "id":  "mtbjf230p42gy8",
+                                    "role":  "user",
+                                    "text":  "hii",
+                                    "time":  "2026-08-27T13:07:21.036Z"
+                                },
+                                {
+                                    "id":  "mtbjf239m0iooj",
+                                    "role":  "assistant",
+                                    "text":  "I can help you with subjects, study planning, quizzes, career preparation, DBMS, DSA, Computer Networks and other college topics. Try asking me a specific question.",
+                                    "time":  "2026-08-27T13:07:21.045Z"
+                                },
+                                {
+                                    "id":  "mtbjj3tnv5sjpn",
+                                    "role":  "user",
+                                    "text":  "hii",
+                                    "time":  "2026-08-27T13:10:29.915Z"
+                                },
+                                {
+                                    "id":  "mtbjj3txte7o2q",
+                                    "role":  "assistant",
+                                    "text":  "Here is a practical way to approach that: define the concept, learn one small example, solve two problems without looking at the solution, and explain the answer in your own words. If you share the exact topic or question, I can give a more specific explanation.",
+                                    "time":  "2026-08-27T13:10:29.925Z"
+                                },
+                                {
+                                    "id":  "mtbjjkopnyc4sf",
+                                    "role":  "user",
+                                    "text":  "explain relational algebra",
+                                    "time":  "2026-08-27T13:10:51.769Z"
+                                },
+                                {
+                                    "id":  "mtbjjkp0mlpiu7",
+                                    "role":  "assistant",
+                                    "text":  "Here is a practical way to approach that: define the concept, learn one small example, solve two problems without looking at the solution, and explain the answer in your own words. If you share the exact topic or question, I can give a more specific explanation.",
+                                    "time":  "2026-08-27T13:10:51.780Z"
+                                },
+                                {
+                                    "id":  "mtbjotg7jne229",
+                                    "role":  "user",
+                                    "text":  "hii",
+                                    "time":  "2026-08-27T13:14:56.407Z"
+                                },
+                                {
+                                    "id":  "mtbjotgjsrxikf",
+                                    "role":  "assistant",
+                                    "text":  "The AI service could not answer: No AI provider configured",
+                                    "time":  "2026-08-27T13:14:56.419Z"
+                                },
+                                {
+                                    "id":  "mtbjvcgar7aame",
+                                    "role":  "user",
+                                    "text":  "hii",
+                                    "time":  "2026-08-27T13:20:00.970Z"
+                                },
+                                {
+                                    "id":  "mtbjvcgncqopdi",
+                                    "role":  "assistant",
+                                    "text":  "The AI service could not answer: No AI provider configured",
+                                    "time":  "2026-08-27T13:20:00.983Z"
+                                },
+                                {
+                                    "id":  "mtbl9lt8hetbnv",
+                                    "role":  "user",
+                                    "text":  "hii",
+                                    "time":  "2026-08-27T13:59:05.900Z"
+                                },
+                                {
+                                    "id":  "mtbl9o6b1dxjsf",
+                                    "role":  "assistant",
+                                    "text":  "The AI service could not answer: {\n    \"error\": {\n        \"message\": \"You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.\",\n        \"type\": \"insufficient_quota\",\n        \"param\": null,\n        \"code\": \"credit_balance_exhausted\"\n    }\n}\n",
+                                    "time":  "2026-08-27T13:59:08.963Z"
+                                },
+                                {
+                                    "id":  "mtbllpbmrniajw",
+                                    "role":  "user",
+                                    "text":  "HII",
+                                    "time":  "2026-08-27T14:08:30.322Z"
+                                },
+                                {
+                                    "id":  "mtbllq10wuyzld",
+                                    "role":  "assistant",
+                                    "text":  "The AI service could not answer: {\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"This model models/gemini-2.0-flash is no longer available. Please update your code to use models/gemini-3.6-flash for the latest features and improvements. We recommend you to use the Interactions API.\",\n    \"status\": \"NOT_FOUND\"\n  }\n}\n",
+                                    "time":  "2026-08-27T14:08:31.236Z"
+                                },
+                                {
+                                    "id":  "mtblqcdhzdap3l",
+                                    "role":  "user",
+                                    "text":  "hii",
+                                    "time":  "2026-08-27T14:12:06.821Z"
+                                },
+                                {
+                                    "id":  "mtblqlix6yi5dr",
+                                    "role":  "assistant",
+                                    "text":  "Hey there! ðŸ‘‹ Welcome back! I\u0027m CampusMate AI, your study assistant.\n\nHow can I help you today? Here are a few things we could do:\n\n1. **Focus on Weak Topics:** Work on improving your understanding of **Trees** (45%), **Routing** (48%), or **Normalization** (50%).\n2. **Review Tasks:** Walk through your upcoming study tasks or create a study plan.\n3. **Practice Quiz:** Take a quick practice quiz to test your knowledge.\n4. **Q\u0026A / Explanations:** Ask me any",
+                                    "time":  "2026-08-27T14:12:18.681Z"
+                                },
+                                {
+                                    "id":  "mtblslrmnzlznr",
+                                    "role":  "user",
+                                    "text":  "explain relational algebra",
+                                    "time":  "2026-08-27T14:13:52.306Z"
+                                },
+                                {
+                                    "id":  "mtblsqlcshszjb",
+                                    "role":  "assistant",
+                                    "text":  "High-Level Summary**: What is Relational Algebra?\n    *   **Key Term",
+                                    "time":  "2026-08-27T14:13:58.560Z"
+                                },
+                                {
+                                    "id":  "mtblt9delrnqyd",
+                                    "role":  "user",
+                                    "text":  "explain in detail",
+                                    "time":  "2026-08-27T14:14:22.898Z"
+                                },
+                                {
+                                    "id":  "mtbltefymmd1eb",
+                                    "role":  "assistant",
+                                    "text":  ":* Acknowledge context (CampusMate AI mode).\n    *   *Primary Focus:*",
+                                    "time":  "2026-08-27T14:14:29.470Z"
+                                },
+                                {
+                                    "id":  "mtbltoyqqihcgb",
+                                    "role":  "user",
+                                    "text":  "do",
+                                    "time":  "2026-08-27T14:14:43.106Z"
+                                },
+                                {
+                                    "id":  "mtbltszhj8t49q",
+                                    "role":  "assistant",
+                                    "text":  "Hey there! Ready to get to work? ðŸš€\n\nHere are a few quick options based on your current weak topics and schedule:\n\n---\n\n###",
+                                    "time":  "2026-08-27T14:14:48.317Z"
+                                },
+                                {
+                                    "id":  "mtbluagdk5bxim",
+                                    "role":  "user",
+                                    "text":  "give",
+                                    "time":  "2026-08-27T14:15:10.957Z"
+                                },
+                                {
+                                    "id":  "mtblumtaap8i2z",
+                                    "role":  "assistant",
+                                    "text":  "The AI service is unavailable. Please check the server AI configuration and try again.",
+                                    "time":  "2026-08-27T14:15:26.974Z"
+                                },
+                                {
+                                    "id":  "mtblut69dgthel",
+                                    "role":  "user",
+                                    "text":  "hii",
+                                    "time":  "2026-08-27T14:15:35.217Z"
+                                },
+                                {
+                                    "id":  "mtbluwdsyx53g1",
+                                    "role":  "assistant",
+                                    "text":  "Hey there! ðŸ‘‹ I\u0027m **CampusMate AI**, your study assistant. \n\nHow can I help you today? We can:\n* ðŸŒ³ **Review weak topics** like **Trees**, **Routing**, or **Normalization**.\n* ðŸ“… **Manage your pending study tasks** and study plan.\n* ðŸ“ **Practice questions** or clarify specific concepts.\n\nWhat would you like to work on today?",
+                                    "time":  "2026-08-27T14:15:39.376Z"
+                                },
+                                {
+                                    "id":  "mtblvel0030p3w",
+                                    "role":  "user",
+                                    "text":  "practice questions",
+                                    "time":  "2026-08-27T14:16:02.964Z"
+                                },
+                                {
+                                    "id":  "mtblvkpxsmib6c",
+                                    "role":  "assistant",
+                                    "text":  "Based on your current weak topics, here is a targeted set of practice questions to test your",
+                                    "time":  "2026-08-27T14:16:10.917Z"
+                                },
+                                {
+                                    "id":  "mtblw2abaf3kel",
+                                    "role":  "user",
+                                    "text":  "give question",
+                                    "time":  "2026-08-27T14:16:33.683Z"
+                                },
+                                {
+                                    "id":  "mtblwen0sm4zwd",
+                                    "role":  "assistant",
+                                    "text":  "The AI service is unavailable. Please check the server AI configuration and try again.",
+                                    "time":  "2026-08-27T14:16:49.692Z"
+                                },
+                                {
+                                    "id":  "mtbm723i2h0bwg",
+                                    "role":  "user",
+                                    "text":  "give questions",
+                                    "time":  "2026-08-27T14:25:06.654Z"
+                                },
+                                {
+                                    "id":  "mtbm7itktojzgp",
+                                    "role":  "assistant",
+                                    "text":  "Here are practice questions tailored specifically to your weakest topics to help you boost your mastery:\n\n---",
+                                    "time":  "2026-08-27T14:25:28.328Z"
+                                }
+                            ]
+}
