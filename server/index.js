@@ -329,6 +329,66 @@ app.get('/api/messages', authMiddleware, async (req, res) => {
 app.post('/api/quiz-generate', authMiddleware, async (req, res) => {
   const topics = Array.isArray(req.body?.topics) ? req.body.topics.filter(Boolean) : [];
   const pool = topics.length ? [...new Set(topics)] : ['Data Structures', 'DBMS', 'Computer Networks'];
+  const count = Math.max(1, Math.min(10, Number(req.body?.count) || 5));
+  const history = loadQuizHistory();
+  const email = req.user?.email || 'anonymous';
+  const used = new Set(history[email] || []);
+
+  const quizPrompt = `Create ${count} important, distinct multiple-choice questions for a student practicing these topics: ${pool.join(', ')}.
+Return ONLY valid JSON in this exact shape: {"questions":[{"topic":"topic name","question":"...","options":["...","...","...","..."],"answer":0}]}.
+The answer must be the zero-based index of the correct option. Avoid these previously used question texts: ${JSON.stringify([...used].slice(-30))}`;
+  try {
+    let payload;
+    if (hasGeminiKey) {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: quizPrompt }] }] }),
+      });
+      if (response.ok) {
+        const body = await response.json();
+        const text = body?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
+        payload = JSON.parse(text.replace(/^```json\s*|\s*```$/g, ''));
+      }
+    } else if (process.env.ANTHROPIC_API_KEY) {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-5',
+          max_tokens: 1800,
+          messages: [{ role: 'user', content: quizPrompt }],
+        }),
+      });
+      if (response.ok) {
+        const body = await response.json();
+        const text = body?.content?.map((block) => block?.text || '').join('').trim() || '';
+        payload = JSON.parse(text.replace(/^```json\s*|\s*```$/g, ''));
+      }
+    }
+    const aiQuestions = payload?.questions;
+    if (Array.isArray(aiQuestions) && aiQuestions.length) {
+      const questions = aiQuestions.slice(0, count).filter((question) =>
+        question && typeof question.question === 'string' && Array.isArray(question.options)
+        && question.options.length === 4 && Number.isInteger(question.answer)
+        && question.answer >= 0 && question.answer < 4
+      ).map((question, index) => ({
+        id: `generated-${Date.now()}-${index}`,
+        topic: question.topic || pool[index % pool.length],
+        question: question.question.trim(),
+        options: question.options.map((option) => String(option)),
+        answer: question.answer,
+      }));
+      if (questions.length) {
+        history[email] = [...new Set([...used, ...questions.map((question) => question.question)])];
+        saveQuizHistory(history);
+        return res.json({ questions });
+      }
+    }
+  } catch (error) {
+    console.error('AI quiz generation failed; using local questions:', error);
+  }
+
   const questionTemplates = [
     {
       matches: ['sql', 'dbms', 'database'],
@@ -379,10 +439,6 @@ app.post('/api/quiz-generate', authMiddleware, async (req, res) => {
       answer: 2,
     },
   ];
-  const history = loadQuizHistory();
-  const email = req.user?.email || 'anonymous';
-  const used = new Set(history[email] || []);
-  const count = Math.max(1, Math.min(10, Number(req.body?.count) || 5));
   const candidatePool = pool;
   const shuffledPool = [...candidatePool];
   for (let i = shuffledPool.length - 1; i > 0; i -= 1) {

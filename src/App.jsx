@@ -1911,6 +1911,8 @@ function Quiz({ data, updateData }) {
           onChange={(event) => {
             const value = event.target.value;
             setSelectedTopic(value);
+            setStarted(false);
+            setFinished(false);
             generateAiQuiz(value);
           }}
         >
@@ -1999,7 +2001,7 @@ function Quiz({ data, updateData }) {
 
           <div className="quiz-actions">
             <Button onClick={() => start(quizQuestions.slice(0, 5))}>Start practice quiz</Button>
-            <Button variant="secondary" disabled={generating} onClick={generateAiQuiz}>
+            <Button variant="secondary" disabled={generating} onClick={() => generateAiQuiz(selectedTopic)}>
               <Sparkles size={16} /> {generating ? "Generating…" : "Generate AI quiz"}
             </Button>
           </div>
