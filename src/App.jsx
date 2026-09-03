@@ -1838,8 +1838,18 @@ function Quiz({ data, updateData }) {
   const [selected, setSelected] = useState(null);
   const [answers, setAnswers] = useState([]);
   const [finished, setFinished] = useState(false);
+  const [selectedTopic, setSelectedTopic] = useState("all");
 
   const question = questions[current];
+  const topicOptions = data.subjects.flatMap((subject) =>
+    subject.topics.map((topic) => ({
+      id: `${subject.id}:${topic.id}`,
+      label: `${subject.name}: ${topic.name}`,
+      value: `${subject.name}: ${topic.name}`,
+    }))
+  );
+  const topicPrompt = topicOptions.map((topic) => topic.value).join("|");
+  const selectedTopicValue = topicOptions.find((topic) => topic.id === selectedTopic)?.value;
 
   function start(nextQuestions = questions) {
     setQuestions(nextQuestions);
@@ -1850,15 +1860,18 @@ function Quiz({ data, updateData }) {
     setFinished(false);
   }
 
-  async function generateAiQuiz() {
+  async function generateAiQuiz(topicOverride = selectedTopic) {
     setGenerating(true);
     setQuizError("");
     try {
+      const topics = topicOverride === "all"
+        ? topicOptions.map((topic) => topic.value)
+        : topicOptions.filter((topic) => topic.id === topicOverride).map((topic) => topic.value);
       const response = await fetch("/api/quiz-generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          topics: data.subjects.flatMap((subject) => subject.topics.map((topic) => `${subject.name}: ${topic.name}`)),
+          topics,
           count: 5,
         }),
       });
@@ -1874,6 +1887,32 @@ function Quiz({ data, updateData }) {
     } finally {
       setGenerating(false);
     }
+  }
+
+  useEffect(() => {
+    if (topicPrompt && !started) generateAiQuiz();
+  }, [topicPrompt, started]);
+
+  function renderTopicSelector() {
+    return (
+      <label className="quiz-topic-selector">
+        <span>Practice topic</span>
+        <select
+          value={selectedTopic}
+          disabled={generating}
+          onChange={(event) => {
+            const value = event.target.value;
+            setSelectedTopic(value);
+            generateAiQuiz(value);
+          }}
+        >
+          <option value="all">All topics</option>
+          {topicOptions.map((topic) => (
+            <option key={topic.id} value={topic.id}>{topic.label}</option>
+          ))}
+        </select>
+      </label>
+    );
   }
 
   function next() {
@@ -1921,8 +1960,9 @@ function Quiz({ data, updateData }) {
         <div className="page-header">
           <div>
             <h1>Quiz Center</h1>
-            <p>Test your Computer Science knowledge.</p>
+            <p>{selectedTopicValue ? `Practice ${selectedTopicValue}.` : "Test your Computer Science knowledge."}</p>
           </div>
+          {renderTopicSelector()}
         </div>
 
         <Card className="quiz-start">
@@ -1966,6 +2006,13 @@ function Quiz({ data, updateData }) {
 
     return (
       <div className="page">
+        <div className="page-header">
+          <div>
+            <h1>Quiz Center</h1>
+            <p>Choose another topic to start a fresh quiz.</p>
+          </div>
+          {renderTopicSelector()}
+        </div>
         <Card className="quiz-result">
           <div className="result-icon">
             <Award size={45} />
@@ -1982,7 +2029,9 @@ function Quiz({ data, updateData }) {
             {last?.total || questions.length} questions correctly.
           </p>
 
-          <Button onClick={start}>Try again</Button>
+          <Button disabled={generating} onClick={generateAiQuiz}>
+            {generating ? "Generating…" : "Try again"}
+          </Button>
         </Card>
       </div>
     );
@@ -1990,6 +2039,13 @@ function Quiz({ data, updateData }) {
 
   return (
     <div className="page">
+      <div className="page-header">
+        <div>
+          <h1>Quiz Center</h1>
+          <p>Practice questions from your tracked topics.</p>
+        </div>
+        {renderTopicSelector()}
+      </div>
       <Card className="question-card">
         <div className="question-top">
           <span>
@@ -2023,7 +2079,7 @@ function Quiz({ data, updateData }) {
 
         <div className="question-actions">
           <Button disabled={selected === null} onClick={next}>
-            {current === quizQuestions.length - 1
+            {current === questions.length - 1
               ? "Finish quiz"
               : "Next question"}
             <ChevronRight size={16} />

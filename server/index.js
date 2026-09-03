@@ -382,28 +382,32 @@ app.post('/api/quiz-generate', authMiddleware, async (req, res) => {
   const history = loadQuizHistory();
   const email = req.user?.email || 'anonymous';
   const used = new Set(history[email] || []);
-  const freshPool = pool;
-  const candidatePool = freshPool.length ? freshPool : pool;
+  const count = Math.max(1, Math.min(10, Number(req.body?.count) || 5));
+  const candidatePool = pool;
   const shuffledPool = [...candidatePool];
   for (let i = shuffledPool.length - 1; i > 0; i -= 1) {
     const j = Math.floor(Math.random() * (i + 1));
     [shuffledPool[i], shuffledPool[j]] = [shuffledPool[j], shuffledPool[i]];
   }
-  const questions = shuffledPool.slice(0, Math.min(5, shuffledPool.length)).map((topic, index) => {
+  const genericTemplates = [
+    (topic) => ({ question: `Which statement best describes ${topic}?`, options: [`It is a core concept in ${topic}`, 'It is unrelated to computing', 'It is only a hardware component', 'It cannot be tested'], answer: 0 }),
+    (topic) => ({ question: `What is a useful way to study ${topic}?`, options: ['Practice and explain examples', 'Avoid practicing', 'Memorize without understanding', 'Skip all examples'], answer: 0 }),
+    (topic) => ({ question: `Which approach helps build confidence in ${topic}?`, options: ['Apply it to a small problem', 'Ignore feedback', 'Only read the title', 'Avoid revising it'], answer: 0 }),
+  ];
+  const questions = Array.from({ length: count }, (_, index) => {
+    const topic = shuffledPool[index % shuffledPool.length];
     const matchingTemplates = questionTemplates.filter(({ matches }) =>
       matches.some((match) => topic.toLowerCase().includes(match))
     );
     const unusedTemplates = matchingTemplates.filter((candidate) => !used.has(candidate.question));
-    const template = (unusedTemplates.length ? unusedTemplates : matchingTemplates)[Math.floor(Math.random() * (unusedTemplates.length || matchingTemplates.length))] || {
-      question: `What is the best way to learn ${topic}?`,
-      options: [
-        'Active recall with practice questions',
-        'Reading once without reviewing',
-        'Skipping difficult concepts',
-        'Studying only before the exam',
-      ],
-      answer: 0,
-    };
+    const availableGeneric = genericTemplates
+      .map((createQuestion) => createQuestion(topic))
+      .filter((candidate) => !used.has(candidate.question));
+    const templates = unusedTemplates.length ? unusedTemplates : availableGeneric.length ? availableGeneric : matchingTemplates;
+    const template = templates[Math.floor(Math.random() * templates.length)]
+      || availableGeneric[Math.floor(Math.random() * availableGeneric.length)]
+      || genericTemplates[index % genericTemplates.length](topic);
+    used.add(template.question);
     return {
       id: `generated-${Date.now()}-${index}`,
       topic,
