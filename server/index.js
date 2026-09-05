@@ -50,9 +50,11 @@ if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 const USERS_FILE = path.join(dataDir, 'users.json');
 const MESSAGES_FILE = path.join(dataDir, 'messages.json');
 const QUIZ_HISTORY_FILE = path.join(dataDir, 'quiz-history.json');
+const FINANCE_FILE = path.join(dataDir, 'finance.json');
 if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, JSON.stringify({}), 'utf8');
 if (!fs.existsSync(MESSAGES_FILE)) fs.writeFileSync(MESSAGES_FILE, JSON.stringify({}), 'utf8');
 if (!fs.existsSync(QUIZ_HISTORY_FILE)) fs.writeFileSync(QUIZ_HISTORY_FILE, JSON.stringify({}), 'utf8');
+if (!fs.existsSync(FINANCE_FILE)) fs.writeFileSync(FINANCE_FILE, JSON.stringify({}), 'utf8');
 
 function loadAllUsers() {
   try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8') || '{}'); } catch { return {}; }
@@ -62,6 +64,8 @@ function loadAllMessages() { try { return JSON.parse(fs.readFileSync(MESSAGES_FI
 function saveAllMessages(obj) { fs.writeFileSync(MESSAGES_FILE, JSON.stringify(obj, null, 2), 'utf8'); }
 function loadQuizHistory() { try { return JSON.parse(fs.readFileSync(QUIZ_HISTORY_FILE, 'utf8') || '{}'); } catch { return {}; } }
 function saveQuizHistory(history) { fs.writeFileSync(QUIZ_HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8'); }
+function loadFinance() { try { return JSON.parse(fs.readFileSync(FINANCE_FILE, 'utf8') || '{}'); } catch { return {}; } }
+function saveFinance(finance) { fs.writeFileSync(FINANCE_FILE, JSON.stringify(finance, null, 2), 'utf8'); }
 
 function quizCacheKey(topics, materials) {
   return createHash('sha256')
@@ -511,6 +515,22 @@ async function initDb() {
       updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
+  await dbClient.query(`
+    CREATE TABLE IF NOT EXISTS finance_transactions (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      type TEXT NOT NULL CHECK (type IN ('income', 'expense', 'lent', 'borrowed')),
+      amount NUMERIC NOT NULL CHECK (amount >= 0),
+      counterparty_name TEXT NOT NULL DEFAULT '',
+      payment_mode TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      transaction_date DATE NOT NULL,
+      status TEXT NOT NULL DEFAULT 'settled' CHECK (status IN ('pending', 'settled')),
+      recurring BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+  `);
   console.log('Connected to DATABASE');
 }
 initDb().catch(e => { console.warn('DB init failed (continuing with file-based storage):', e.message || e); });
@@ -573,6 +593,114 @@ async function loadMessagesForEmail(email) {
     const r = await dbClient.query('SELECT chat FROM messages WHERE email = $1', [key]);
     if (!r.rows.length) return [];
     return r.rows[0].chat || [];
+  }
+
+  const FINANCE_TYPES = new Set(['income', 'expense', 'lent', 'borrowed']);
+  const PAYMENT_MODES = new Set(['Cash', 'UPI', 'Bank Transfer', 'Card', 'Other']);
+  const FINANCE_CATEGORIES = new Set(['Food', 'Rent', 'Salary', 'Travel', 'Tuition', 'Other']);
+
+  function normalizeTransaction(input, existing = {}) {
+    const type = FINANCE_TYPES.has(input.type) ? input.type : existing.type;
+    const amount = Number(input.amount ?? existing.amount);
+    const paymentMode = PAYMENT_MODES.has(input.paymentMode) ? input.paymentMode : existing.paymentMode;
+    const date = String(input.date ?? existing.date ?? '').slice(0, 10);
+    if (!type || !Number.isFinite(amount) || amount <= 0 || !paymentMode || !date) {
+      return null;
+    }
+    const status = (type === 'lent' || type === 'borrowed')
+      ? (input.status === 'settled' || existing.status === 'settled' ? 'settled' : 'pending')
+      : 'settled';
+    return {
+      id: existing.id || input.id || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      type,
+      amount: Math.round(amount * 100) / 100,
+      counterpartyName: String(input.counterpartyName ?? existing.counterpartyName ?? '').trim().slice(0, 160),
+      paymentMode,
+      category: FINANCE_CATEGORIES.has(input.category) ? input.category : String(input.category ?? existing.category ?? 'Other').trim().slice(0, 80) || 'Other',
+      note: String(input.note ?? existing.note ?? '').trim().slice(0, 1000),
+      date,
+      status,
+      recurring: Boolean(input.recurring ?? existing.recurring),
+      createdAt: existing.createdAt || input.createdAt || new Date().toISOString(),
+    };
+  }
+
+  async function listFinanceTransactions(email) {
+    const key = (email || '').trim().toLowerCase();
+    if (useDb && dbClient) {
+      const result = await dbClient.query('SELECT id, type, amount, counterparty_name, payment_mode, category, note, transaction_date, status, recurring, created_at FROM finance_transactions WHERE email = $1 ORDER BY transaction_date DESC, created_at DESC', [key]);
+      return result.rows.map((row) => ({
+        id: row.id, type: row.type, amount: Number(row.amount), counterpartyName: row.counterparty_name,
+        paymentMode: row.payment_mode, category: row.category, note: row.note,
+        date: String(row.transaction_date).slice(0, 10), status: row.status, recurring: row.recurring,
+        createdAt: row.created_at,
+      }));
+    }
+    return (loadFinance()[key] || []).sort((a, b) => `${b.date}${b.createdAt}`.localeCompare(`${a.date}${a.createdAt}`));
+  }
+
+  async function saveFinanceTransaction(email, transaction) {
+    const key = (email || '').trim().toLowerCase();
+    if (useDb && dbClient) {
+      await dbClient.query(`INSERT INTO finance_transactions
+        (id, email, type, amount, counterparty_name, payment_mode, category, note, transaction_date, status, recurring, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        ON CONFLICT (id) DO UPDATE SET type=$3, amount=$4, counterparty_name=$5, payment_mode=$6, category=$7, note=$8, transaction_date=$9, status=$10, recurring=$11`,
+      [transaction.id, key, transaction.type, transaction.amount, transaction.counterpartyName, transaction.paymentMode, transaction.category, transaction.note, transaction.date, transaction.status, transaction.recurring, transaction.createdAt]);
+      return transaction;
+    }
+    const all = loadFinance();
+    all[key] = (all[key] || []).filter((item) => item.id !== transaction.id);
+    all[key].push(transaction);
+    saveFinance(all);
+    return transaction;
+  }
+
+  async function deleteFinanceTransaction(email, id) {
+    const key = (email || '').trim().toLowerCase();
+    if (useDb && dbClient) {
+      const result = await dbClient.query('DELETE FROM finance_transactions WHERE id = $1 AND email = $2', [id, key]);
+      return result.rowCount > 0;
+    }
+    const all = loadFinance();
+    const before = all[key] || [];
+    all[key] = before.filter((item) => item.id !== id);
+    saveFinance(all);
+    return all[key].length !== before.length;
+  }
+
+  function filterFinanceTransactions(transactions, query) {
+    const today = new Date();
+    const range = query.range || 'all';
+    let from = query.from ? new Date(`${query.from}T00:00:00`) : null;
+    const to = query.to ? new Date(`${query.to}T23:59:59`) : null;
+    if (!from && range !== 'all') {
+      from = new Date(today);
+      from.setHours(0, 0, 0, 0);
+      from.setDate(from.getDate() - (range === 'week' ? 6 : 29));
+    }
+    return transactions.filter((transaction) => {
+      const date = new Date(`${transaction.date}T12:00:00`);
+      return (!from || date >= from) && (!to || date <= to) && (!query.type || transaction.type === query.type);
+    });
+  }
+
+  function summarizeFinanceTransactions(transactions) {
+    const summary = { totalIncome: 0, totalExpense: 0, netBalance: 0, totalPendingToReceive: 0, totalPendingToPay: 0, byCategory: {} };
+    for (const transaction of transactions) {
+      if (transaction.type === 'income') summary.totalIncome += transaction.amount;
+      if (transaction.type === 'expense') {
+        summary.totalExpense += transaction.amount;
+        summary.byCategory[transaction.category || 'Other'] = (summary.byCategory[transaction.category || 'Other'] || 0) + transaction.amount;
+      }
+      if (transaction.type === 'lent' && transaction.status === 'pending') summary.totalPendingToReceive += transaction.amount;
+      if (transaction.type === 'borrowed' && transaction.status === 'pending') summary.totalPendingToPay += transaction.amount;
+    }
+    summary.netBalance = summary.totalIncome - summary.totalExpense;
+    for (const key of Object.keys(summary)) {
+      if (key !== 'byCategory') summary[key] = Math.round(summary[key] * 100) / 100;
+    }
+    return summary;
   }
 
   const all = loadAllMessages();
@@ -746,6 +874,64 @@ app.get('/api/messages', authMiddleware, async (req, res) => {
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: 'db error' });
+  }
+});
+
+app.post('/api/finance/transactions', authMiddleware, async (req, res) => {
+  try {
+    const transaction = normalizeTransaction(req.body || {});
+    if (!transaction) return res.status(400).json({ error: 'Type, positive amount, payment mode, and date are required' });
+    await saveFinanceTransaction(req.user.email, transaction);
+    return res.status(201).json({ transaction });
+  } catch (error) {
+    console.error('Finance transaction creation failed:', error);
+    return res.status(500).json({ error: 'Unable to save transaction' });
+  }
+});
+
+app.get('/api/finance/transactions', authMiddleware, async (req, res) => {
+  try {
+    const transactions = filterFinanceTransactions(await listFinanceTransactions(req.user.email), req.query || {});
+    return res.json({ transactions });
+  } catch (error) {
+    console.error('Finance transaction listing failed:', error);
+    return res.status(500).json({ error: 'Unable to load transactions' });
+  }
+});
+
+app.patch('/api/finance/transactions/:id', authMiddleware, async (req, res) => {
+  try {
+    const transactions = await listFinanceTransactions(req.user.email);
+    const existing = transactions.find((transaction) => transaction.id === req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Transaction not found' });
+    const transaction = normalizeTransaction(req.body || {}, existing);
+    if (!transaction) return res.status(400).json({ error: 'Invalid transaction data' });
+    await saveFinanceTransaction(req.user.email, transaction);
+    return res.json({ transaction });
+  } catch (error) {
+    console.error('Finance transaction update failed:', error);
+    return res.status(500).json({ error: 'Unable to update transaction' });
+  }
+});
+
+app.delete('/api/finance/transactions/:id', authMiddleware, async (req, res) => {
+  try {
+    const deleted = await deleteFinanceTransaction(req.user.email, req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Transaction not found' });
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Finance transaction deletion failed:', error);
+    return res.status(500).json({ error: 'Unable to delete transaction' });
+  }
+});
+
+app.get('/api/finance/summary', authMiddleware, async (req, res) => {
+  try {
+    const transactions = filterFinanceTransactions(await listFinanceTransactions(req.user.email), req.query || {});
+    return res.json(summarizeFinanceTransactions(transactions));
+  } catch (error) {
+    console.error('Finance summary failed:', error);
+    return res.status(500).json({ error: 'Unable to load finance summary' });
   }
 });
 

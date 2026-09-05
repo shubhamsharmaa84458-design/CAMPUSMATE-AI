@@ -6,6 +6,7 @@ import {
   Sparkles,
   Brain,
   BarChart3,
+  WalletCards,
   Compass,
   FileText,
   Eye,
@@ -37,12 +38,20 @@ import {
   Tooltip,
   BarChart,
   Bar,
+  PieChart,
+  Pie,
+  Cell,
+  Legend,
 } from "recharts";
 
 import './init-fetch';
 
 const USERS_KEY = "campusmate_users";
 const SESSION_KEY = "campusmate_session";
+const CURRENCY_SYMBOL = "₹";
+const FINANCE_TYPES = ["income", "expense", "lent", "borrowed"];
+const PAYMENT_MODES = ["Cash", "UPI", "Bank Transfer", "Card", "Other"];
+const FINANCE_CATEGORIES = ["Food", "Rent", "Salary", "Travel", "Tuition", "Other"];
 
 const defaultData = {
   subjects: [
@@ -84,6 +93,7 @@ const defaultData = {
   syllabus: null,
   notes: [],
   attendance: {},
+  finances: [],
 };
 
 const uid = () =>
@@ -419,6 +429,23 @@ function Auth({ onLogin }) {
 
 function Sidebar({ view, setView, user, logout }) {
   const [mobile, setMobile] = useState(false);
+  const [overdueCount, setOverdueCount] = useState(0);
+
+  useEffect(() => {
+    const token = localStorage.getItem("campusmate_token");
+    if (!token) return;
+    fetch("/api/finance/transactions?range=all", { headers: { Authorization: `Bearer ${token}` } })
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload) => {
+        const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
+        setOverdueCount((payload?.transactions || []).filter((item) =>
+          (item.type === "lent" || item.type === "borrowed")
+          && item.status === "pending"
+          && new Date(`${item.date}T23:59:59`).getTime() < cutoff
+        ).length);
+      })
+      .catch(() => setOverdueCount(0));
+  }, [view]);
 
   const items = [
     ["dashboard", "Dashboard", LayoutDashboard],
@@ -429,6 +456,7 @@ function Sidebar({ view, setView, user, logout }) {
     ["assistant", "AI Assistant", Sparkles],
     ["quiz", "Quiz", Brain],
     ["analytics", "Analytics", BarChart3],
+    ["finances", "Finances", WalletCards],
     ["roadmap", "Career Roadmap", Compass],
   ];
 
@@ -461,6 +489,7 @@ function Sidebar({ view, setView, user, logout }) {
             >
               <Icon size={17} />
               {label}
+              {id === "finances" && overdueCount > 0 && <span className="finance-badge">{overdueCount}</span>}
             </button>
           ))}
         </nav>
@@ -2002,6 +2031,7 @@ function Notes({ data, updateData }) {
       setError("Enter a chapter name before choosing a PDF.");
       return;
     }
+
     setUploading(true);
     setError("");
     try {
@@ -2632,11 +2662,144 @@ function Quiz({ data, updateData }) {
   );
 }
 
+function formatCurrency(value) {
+  return `${CURRENCY_SYMBOL}${Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+}
+
+function Finance() {
+  const [range, setRange] = useState("month");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+  const [transactions, setTransactions] = useState([]);
+  const [summary, setSummary] = useState({ totalIncome: 0, totalExpense: 0, netBalance: 0, totalPendingToReceive: 0, totalPendingToPay: 0, byCategory: {} });
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [error, setError] = useState("");
+  const token = localStorage.getItem("campusmate_token");
+
+  const loadFinance = async () => {
+    if (!token) return;
+    const query = range === "custom"
+      ? `?range=all&from=${customFrom}&to=${customTo}`
+      : `?range=${range}`;
+    const headers = { Authorization: `Bearer ${token}` };
+    const [transactionsResponse, summaryResponse] = await Promise.all([
+      fetch(`/api/finance/transactions${query}`, { headers }),
+      fetch(`/api/finance/summary${query}`, { headers }),
+    ]);
+    if (!transactionsResponse.ok || !summaryResponse.ok) throw new Error("Unable to load finance data");
+    const transactionPayload = await transactionsResponse.json();
+    setTransactions(transactionPayload.transactions || []);
+    setSummary(await summaryResponse.json());
+  };
+
+  useEffect(() => {
+    loadFinance().catch((loadError) => setError(loadError.message));
+  }, [range, customFrom, customTo, token]);
+
+  const saveTransaction = async (form) => {
+    setError("");
+    const response = await fetch(
+      editing ? `/api/finance/transactions/${editing.id}` : "/api/finance/transactions",
+      {
+        method: editing ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(form),
+      }
+    );
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Unable to save transaction");
+    setShowForm(false);
+    setEditing(null);
+    await loadFinance();
+  };
+
+  const updateTransaction = async (transaction, changes) => {
+    const response = await fetch(`/api/finance/transactions/${transaction.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ ...transaction, ...changes }),
+    });
+    if (!response.ok) throw new Error("Unable to update transaction");
+    await loadFinance();
+  };
+
+  const deleteTransaction = async (transaction) => {
+    if (!window.confirm("Delete this transaction?")) return;
+    const response = await fetch(`/api/finance/transactions/${transaction.id}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error("Unable to delete transaction");
+    await loadFinance();
+  };
+
+  const pending = transactions
+    .filter((transaction) => (transaction.type === "lent" || transaction.type === "borrowed") && transaction.status === "pending")
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const overdue = (transaction) => Date.now() - new Date(`${transaction.date}T23:59:59`).getTime() > 30 * 24 * 60 * 60 * 1000;
+  const typeLabel = { income: "Income", expense: "Expense", lent: "Lent", borrowed: "Borrowed" };
+
+  return (
+    <div className="page">
+      <div className="page-header">
+        <div><h1>My Finances</h1><p>Track income, spending, and money to receive or repay.</p></div>
+        <Button className="finance-add-btn" onClick={() => { setEditing(null); setShowForm(true); }}>+ Add Transaction</Button>
+      </div>
+      {error && <div className="error">{error}</div>}
+      <div className="finance-filter">
+        {["week", "month", "all", "custom"].map((value) => <button key={value} className={range === value ? "active" : ""} onClick={() => setRange(value)}>{value === "all" ? "All-time" : value[0].toUpperCase() + value.slice(1)}</button>)}
+        {range === "custom" && <><input type="date" value={customFrom} onChange={(event) => setCustomFrom(event.target.value)} /><input type="date" value={customTo} onChange={(event) => setCustomTo(event.target.value)} /></>}
+      </div>
+      <div className="finance-summary-grid">
+        <StatCard icon={<TrendingUp />} title="Total Income" value={formatCurrency(summary.totalIncome)} text={range === "all" ? "All-time" : "Selected period"} />
+        <StatCard icon={<TrendingUp />} title="Total Expense" value={formatCurrency(summary.totalExpense)} text={range === "all" ? "All-time" : "Selected period"} />
+        <StatCard icon={<BarChart3 />} title="Net Balance" value={formatCurrency(summary.netBalance)} text={summary.netBalance >= 0 ? "Positive balance" : "Needs attention"} />
+        <Card className="finance-pending-card"><div className="stat-top"><span>Pending</span><AlertTriangle size={19} /></div><div className="finance-pending-values"><div><small>You'll receive</small><strong>{formatCurrency(summary.totalPendingToReceive)}</strong></div><div><small>You owe</small><strong>{formatCurrency(summary.totalPendingToPay)}</strong></div></div></Card>
+      </div>
+      {pending.length > 0 && <Card className="finance-pending-section"><SectionTitle title="Pending repayments" /><div className="finance-pending-list">{pending.map((transaction) => <div className="finance-pending-row" key={transaction.id}><div><strong>{transaction.counterpartyName || "Unnamed contact"}</strong><span>{typeLabel[transaction.type]} · {transaction.date}</span></div><b>{formatCurrency(transaction.amount)}</b>{overdue(transaction) && <em>Overdue</em>}<Button variant="secondary" onClick={() => updateTransaction(transaction, { status: "settled" })}>Mark settled</Button></div>)}</div></Card>}
+      <Card>
+        <SectionTitle title="Transaction history" action={<span className="muted small">{transactions.length} entries</span>} />
+        {transactions.length === 0 ? <Empty icon={<WalletCards size={30} />} title="No transactions yet" text="Add your first income, expense, or lending entry." action={<Button onClick={() => setShowForm(true)}>Add Transaction</Button>} /> : <div className="finance-list">{transactions.map((transaction) => <div className={`finance-row finance-${transaction.type}`} key={transaction.id}><span className="finance-type">{typeLabel[transaction.type]}</span><div className="finance-row-main"><strong>{transaction.counterpartyName || transaction.category || "Personal transaction"}</strong><span>{transaction.paymentMode} · {transaction.category || "Other"}{transaction.note ? ` · ${transaction.note}` : ""}</span></div><b>{formatCurrency(transaction.amount)}</b><Button variant="secondary" onClick={() => { setEditing(transaction); setShowForm(true); }}>Edit</Button><Button variant="danger" onClick={() => deleteTransaction(transaction)}>Delete</Button></div>)}</div>}
+      </Card>
+      {showForm && <FinanceForm transaction={editing} close={() => { setShowForm(false); setEditing(null); }} save={saveTransaction} />}
+    </div>
+  );
+}
+
+function FinanceForm({ transaction, close, save }) {
+  const [form, setForm] = useState(transaction || { type: "expense", amount: "", counterpartyName: "", paymentMode: "UPI", category: "Other", date: new Date().toISOString().slice(0, 10), note: "", recurring: false });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const update = (key, value) => setForm((current) => ({ ...current, [key]: value }));
+  return <Modal title={transaction ? "Edit transaction" : "Add transaction"} close={close}><form className="finance-form" onSubmit={async (event) => { event.preventDefault(); setSaving(true); setError(""); try { await save(form); } catch (saveError) { setError(saveError.message); } finally { setSaving(false); } }}>
+    <div className="finance-type-selector">{FINANCE_TYPES.map((type) => <button type="button" className={form.type === type ? "active" : ""} key={type} onClick={() => update("type", type)}>{type[0].toUpperCase() + type.slice(1)}</button>)}</div>
+    <label>Amount<input type="number" min="0.01" step="0.01" value={form.amount} onChange={(event) => update("amount", event.target.value)} required /></label>
+    <label>Counterparty name<input value={form.counterpartyName} onChange={(event) => update("counterpartyName", event.target.value)} placeholder="Optional" /></label>
+    <label>Payment mode<select value={form.paymentMode} onChange={(event) => update("paymentMode", event.target.value)}>{PAYMENT_MODES.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
+    <label>Category<select value={form.category} onChange={(event) => update("category", event.target.value)}>{FINANCE_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></label>
+    <label>Date<input type="date" value={form.date} onChange={(event) => update("date", event.target.value)} required /></label>
+    <label>Note<textarea value={form.note} onChange={(event) => update("note", event.target.value)} placeholder="Optional description" rows="3" /></label>
+    <label className="finance-recurring"><input type="checkbox" checked={Boolean(form.recurring)} onChange={(event) => update("recurring", event.target.checked)} /> Mark as recurring reminder</label>
+    {error && <div className="error">{error}</div>}<div className="modal-actions"><Button variant="secondary" type="button" onClick={close}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save transaction"}</Button></div>
+  </form></Modal>;
+}
+
 /* =========================================================
    ANALYTICS
 ========================================================= */
 
-function Analytics({ data }) {
+function Analytics({ data, user }) {
+  const [financeRange, setFinanceRange] = useState("month");
+  const [financeTransactions, setFinanceTransactions] = useState([]);
+  useEffect(() => {
+    const token = localStorage.getItem("campusmate_token");
+    if (!token) return;
+    fetch(`/api/finance/transactions?range=${financeRange}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((response) => response.ok ? response.json() : { transactions: [] })
+      .then((payload) => setFinanceTransactions(payload.transactions || []))
+      .catch(() => setFinanceTransactions([]));
+  }, [financeRange, user?.email]);
   const average =
     data.attempts.length === 0
       ? 0
@@ -2662,6 +2825,22 @@ function Analytics({ data }) {
             ) / subject.topics.length
           ),
   }));
+  const financeByDate = Object.values(financeTransactions.reduce((groups, transaction) => {
+    const key = financeRange === "all" ? transaction.date.slice(0, 7) : transaction.date;
+    groups[key] = groups[key] || { name: key, income: 0, expense: 0 };
+    if (transaction.type === "income") groups[key].income += transaction.amount;
+    if (transaction.type === "expense") groups[key].expense += transaction.amount;
+    return groups;
+  }, {}));
+  const expenseData = Object.entries(financeTransactions.filter((transaction) => transaction.type === "expense").reduce((groups, transaction) => {
+    groups[transaction.category || "Other"] = (groups[transaction.category || "Other"] || 0) + transaction.amount;
+    return groups;
+  }, {})).map(([name, value]) => ({ name, value }));
+  const financeColors = ["#5b5ce2", "#24a071", "#e35050", "#f0a04b", "#8b5cf6", "#64748b"];
+  const financeTrend = financeByDate.length > 1
+    ? financeByDate[financeByDate.length - 1].income - financeByDate[financeByDate.length - 1].expense
+      - (financeByDate[financeByDate.length - 2].income - financeByDate[financeByDate.length - 2].expense)
+    : 0;
 
   return (
     <div className="page">
@@ -2758,6 +2937,12 @@ function Analytics({ data }) {
             </div>
           )}
         </Card>
+      </div>
+      <div className="finance-analytics-header"><h2>Finance analytics</h2><div className="finance-filter">{["month", "all"].map((value) => <button key={value} className={financeRange === value ? "active" : ""} onClick={() => setFinanceRange(value)}>{value === "all" ? "All-time" : "Month"}</button>)}</div></div>
+      <div className="finance-trend-stat"><TrendingUp size={18} /><span>Net balance trend</span><strong className={financeTrend >= 0 ? "positive" : "negative"}>{financeTrend >= 0 ? "Up" : "Down"} {formatCurrency(Math.abs(financeTrend))} vs previous period</strong></div>
+      <div className="two-column">
+        <Card><SectionTitle title="Income vs expense" />{financeByDate.length === 0 ? <Empty icon={<BarChart3 size={30} />} title="No finance data" text="Add transactions to see trends." /> : <ResponsiveContainer width="100%" height={280}><LineChart data={financeByDate}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="name" /><YAxis /><Tooltip formatter={(value) => formatCurrency(value)} /><Legend /><Line type="monotone" dataKey="income" stroke="#24a071" strokeWidth={3} /><Line type="monotone" dataKey="expense" stroke="#e35050" strokeWidth={3} /></LineChart></ResponsiveContainer>}</Card>
+        <Card><SectionTitle title="Expense breakdown" />{expenseData.length === 0 ? <Empty icon={<BarChart3 size={30} />} title="No expenses" text="Expense categories will appear here." /> : <ResponsiveContainer width="100%" height={280}><PieChart><Pie data={expenseData} dataKey="value" nameKey="name" innerRadius={60} outerRadius={95} paddingAngle={3}>{expenseData.map((entry, index) => <Cell key={entry.name} fill={financeColors[index % financeColors.length]} />)}</Pie><Tooltip formatter={(value) => formatCurrency(value)} /><Legend /></PieChart></ResponsiveContainer>}</Card>
       </div>
     </div>
   );
@@ -2983,6 +3168,9 @@ export default function App() {
       case "notes":
         return <Notes data={data} updateData={updateData} />;
 
+      case "attendance":
+        return <Attendance data={data} updateData={updateData} />;
+
       case "planner":
         return (
           <Planner data={data} updateData={updateData} />
@@ -3000,7 +3188,10 @@ export default function App() {
         return <Quiz data={data} updateData={updateData} />;
 
       case "analytics":
-        return <Analytics data={data} />;
+        return <Analytics data={data} user={user} />;
+
+      case "finances":
+        return <Finance />;
 
       case "roadmap":
         return <Roadmap />;
