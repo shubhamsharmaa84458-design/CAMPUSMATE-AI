@@ -78,15 +78,34 @@ async function extractPdfText(buffer) {
 
 function parseSyllabusText(text) {
   try {
-    const lines = text
+    const rawLines = text
       .split(/\r?\n/)
       .flatMap((line) => line.split(/\s{2,}|\t/))
       .map((line) => line.replace(/\s+/g, ' ').trim())
       .filter(Boolean);
+    const lines = [...rawLines];
+    for (const line of rawLines) {
+      const matches = line.match(/\b[A-Z]{2,8}[-\s]?\d{2,4}\s*[:.)-]?\s+[A-Za-z][A-Za-z0-9 &'()/,-]{3,100}/g);
+      if (matches) lines.push(...matches);
+    }
     const subjects = [];
     const seen = new Set();
+    const addSubject = (name, code = '') => {
+      const normalized = name.replace(/\s+/g, ' ').trim();
+      const key = normalized.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      if (!normalized || normalized.length < 4 || seen.has(key) || /https?:\/\//i.test(normalized)) return;
+      if (/^(syllabus|semester|university|b\.?tech|department|credits?|introduction|objectives|references|total|elective|lecture|tutorial|course outcomes?)\b/i.test(normalized)) return;
+      seen.add(key);
+      subjects.push({ id: `pdf-${subjects.length + 1}`, name: normalized, code, topics: [{ id: `pdf-topic-${subjects.length + 1}`, name: normalized, mastery: 0 }] });
+    };
     for (const line of lines) {
-      if (line.length < 4 || line.length > 120 || /^\d+$/.test(line)) continue;
+      if (line.length < 4 || /^\d+$/.test(line)) continue;
+      const codeMatch = line.match(/^\s*([A-Z]{2,8}[-\s]?\d{2,4})\s*[:.)-]?\s+(.{4,120})$/i);
+      if (codeMatch) {
+        addSubject(codeMatch[2], codeMatch[1].toUpperCase());
+        if (subjects.length >= 30) break;
+        continue;
+      }
       const normalized = line
         .replace(/^(unit|module|subject|course)\s*[-:.\d]*/i, '')
         .replace(/^\s*(?:\d+[\s.)-]+)+/, '')
@@ -97,21 +116,23 @@ function parseSyllabusText(text) {
       if (!normalized || /^(syllabus|semester|university|b\.?tech|department|credits?)\b/i.test(normalized)) continue;
       if (!/[A-Za-z]{3}/.test(normalized) || /https?:\/\//i.test(normalized)) continue;
       if (/^(introduction|objectives|references|total|elective|lecture|tutorial|course outcomes?)\b/i.test(normalized)) continue;
-      const key = normalized.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-      if (seen.has(key) || /^(introduction|objectives|references|total|elective|lecture|tutorial)\b/i.test(normalized)) continue;
-      seen.add(key);
-      subjects.push({ id: `pdf-${subjects.length + 1}`, name: normalized, code: '', topics: [{ id: `pdf-topic-${subjects.length + 1}`, name: normalized, mastery: 0 }] });
+      addSubject(normalized);
       if (subjects.length >= 30) break;
     }
     if (!subjects.length) {
       for (const line of lines) {
-        const match = line.match(/^\s*([A-Z]{2,}(?:[-\s]?\d{2,4}))\s*[:.)-]?\s+(.{4,120})$/i);
+        const match = line.match(/^\s*(?:\d+[\s.)-]+)+(.{4,120})$/i);
+        if (match) addSubject(match[1]);
+        const codeMatch = line.match(/^\s*([A-Z]{2,8}(?:[-\s]?\d{2,4}))\s*[:.)-]?\s+(.{4,120})$/i);
+        if (codeMatch) addSubject(codeMatch[2], codeMatch[1].toUpperCase());
+        if (subjects.length >= 30) break;
+      }
+    }
+    if (!subjects.length && lines.length === 1) {
+      for (const part of lines[0].split(/[|;]+/)) {
+        const match = part.match(/^\s*(?:\d+[\s.)-]+)?(.{4,120})$/);
         if (!match) continue;
-        const normalized = match[2].replace(/\s+/g, ' ').trim();
-        const key = normalized.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-        if (!normalized || seen.has(key) || /https?:\/\//i.test(normalized)) continue;
-        seen.add(key);
-        subjects.push({ id: `pdf-${subjects.length + 1}`, name: normalized, code: match[1].toUpperCase(), topics: [{ id: `pdf-topic-${subjects.length + 1}`, name: normalized, mastery: 0 }] });
+        addSubject(match[1]);
         if (subjects.length >= 30) break;
       }
     }
