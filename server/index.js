@@ -38,7 +38,7 @@ const hasOpenAIKey = Boolean(OPENAI_KEY && !OPENAI_KEY.startsWith('replace-with-
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const hasGeminiKey = Boolean(GEMINI_KEY && !GEMINI_KEY.startsWith('replace-with-'));
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET || JWT_SECRET.length < 32) {
   console.error("JWT_SECRET must be set to a random value of at least 32 characters.");
@@ -305,7 +305,7 @@ async function extractPdfWithGemini(buffer, kind = 'syllabus') {
 }
 
 async function getGeminiModels() {
-  const candidates = [GEMINI_MODEL, 'gemini-2.5-flash', 'gemini-2.0-flash'];
+  const candidates = [GEMINI_MODEL];
   try {
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(GEMINI_KEY)}`);
     if (response.ok) {
@@ -314,7 +314,7 @@ async function getGeminiModels() {
         .filter((model) => model.supportedGenerationMethods?.includes('generateContent'))
         .map((model) => model.name?.replace(/^models\//, ''))
         .filter(Boolean);
-      return [...new Set([...available.filter((model) => /flash|pro/i.test(model)), ...candidates])];
+      return [...new Set([GEMINI_MODEL, ...available.filter((model) => model !== GEMINI_MODEL && /flash|pro/i.test(model))])];
     }
   } catch (error) {
     console.error('Unable to discover Gemini models:', error);
@@ -1567,7 +1567,7 @@ async function streamAnthropic(prompt, context, res) {
 }
 
 async function streamGemini(prompt, context, res) {
-  const model = (await getGeminiModels())[0];
+  const model = GEMINI_MODEL;
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(GEMINI_KEY)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
