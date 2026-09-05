@@ -3168,9 +3168,6 @@ export default function App() {
       case "notes":
         return <Notes data={data} updateData={updateData} />;
 
-      case "attendance":
-        return <Attendance data={data} updateData={updateData} />;
-
       case "planner":
         return (
           <Planner data={data} updateData={updateData} />
