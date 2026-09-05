@@ -93,10 +93,21 @@ async function parseSyllabus(buffer) {
   return aiSubjects.length ? aiSubjects : parseSyllabusText(result);
 }
 
+function splitSyllabusTopics(topicNames) {
+  return [...new Set(topicNames
+    .flatMap((topic) => String(topic || '').split(/[,;|]+/))
+    .map((topic) => topic
+      .replace(/^\s*(?:topic|unit|chapter)\s*[:.-]?\s*/i, '')
+      .replace(/^\s*(?:\d+[\s.)-]+)+/, '')
+      .replace(/\s+/g, ' ')
+      .trim())
+    .filter((topic) => topic.length >= 3))];
+}
+
 async function parseSyllabusWithAI(text) {
   const prompt = `Extract every subject/course from this syllabus. Return only valid JSON in this exact shape:
 {"subjects":[{"name":"Subject name","code":"COURSE CODE","topics":["topic 1","topic 2"]}]}
-Do not include university metadata, semesters, credits, headings, or explanations. If a code or topics are unavailable, use an empty string or empty array.
+Each comma-, semicolon-, or pipe-separated item must be a separate topic string. Never combine multiple topics into one array item. Do not include university metadata, semesters, credits, headings, or explanations. If a code or topics are unavailable, use an empty string or empty array.
 
 SYLLABUS:
 ${text.slice(0, 50000)}`;
@@ -139,7 +150,7 @@ ${text.slice(0, 50000)}`;
       .map((subject) => ({
         name: subject.name.trim(),
         code: typeof subject.code === 'string' ? subject.code.trim() : '',
-        topics: Array.isArray(subject.topics) ? subject.topics.filter((topic) => typeof topic === 'string') : [],
+        topics: Array.isArray(subject.topics) ? splitSyllabusTopics(subject.topics.filter((topic) => typeof topic === 'string')) : [],
       }))
       .filter((subject) => subject.name.length >= 4)
       .slice(0, 30)
@@ -147,7 +158,7 @@ ${text.slice(0, 50000)}`;
         id: `pdf-${index + 1}`,
         name: subject.name,
         code: subject.code,
-        topics: (subject.topics.length ? subject.topics : [subject.name]).slice(0, 20).map((name, topicIndex) => ({
+        topics: splitSyllabusTopics(subject.topics.length ? subject.topics : [subject.name]).slice(0, 20).map((name, topicIndex) => ({
           id: `pdf-topic-${index + 1}-${topicIndex + 1}`,
           name: name.trim(),
           mastery: 0,
@@ -335,7 +346,7 @@ function parseSyllabusText(text) {
       if (!normalized || normalized.length < 4 || seen.has(key) || /https?:\/\//i.test(normalized)) return;
       if (/^(syllabus|semester|university|b\.?tech|department|credits?|introduction|objectives|references|total|elective|lecture|tutorial|course outcomes?)\b/i.test(normalized)) return;
       seen.add(key);
-      const topics = [...new Set(topicNames.map((topic) => topic.replace(/^\s*(?:\d+[\s.)-]+)+/, '').trim()).filter((topic) => topic.length >= 3))];
+      const topics = splitSyllabusTopics(topicNames);
       subjects.push({
         id: `pdf-${subjects.length + 1}`,
         name: normalized,
