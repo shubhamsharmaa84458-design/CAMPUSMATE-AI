@@ -27,6 +27,7 @@ import {
   Clock,
   User,
   Menu,
+  Upload,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -2675,6 +2676,9 @@ function Finance() {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
   const [error, setError] = useState("");
+  const [screenshotReading, setScreenshotReading] = useState(false);
+  const [screenshotNote, setScreenshotNote] = useState("");
+  const screenshotInputRef = useRef(null);
   const token = localStorage.getItem("campusmate_token");
 
   const loadFinance = async () => {
@@ -2700,9 +2704,9 @@ function Finance() {
   const saveTransaction = async (form) => {
     setError("");
     const response = await fetch(
-      editing ? `/api/finance/transactions/${editing.id}` : "/api/finance/transactions",
+      editing?.id ? `/api/finance/transactions/${editing.id}` : "/api/finance/transactions",
       {
-        method: editing ? "PATCH" : "POST",
+        method: editing?.id ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify(form),
       }
@@ -2734,6 +2738,44 @@ function Finance() {
     await loadFinance();
   };
 
+  const extractScreenshot = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setScreenshotReading(true);
+    setError("");
+    setScreenshotNote("");
+    try {
+      const body = new FormData();
+      body.append("screenshot", file);
+      const response = await fetch("/api/finance/extract-screenshot", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + (localStorage.getItem("campusmate_token") || "") },
+        body,
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Unable to read screenshot");
+      const extracted = payload.extracted || {};
+      setEditing({
+        type: extracted.type || "",
+        amount: extracted.amount ?? "",
+        counterpartyName: extracted.counterpartyName || "",
+        paymentMode: extracted.paymentMode || "",
+        category: "",
+        date: extracted.date || "",
+        note: extracted.note || "",
+        recurring: false,
+        sourceType: "screenshot",
+      });
+      if (!Object.values(extracted).some(Boolean)) setScreenshotNote("Couldn't read details from this image — please fill in manually.");
+      setShowForm(true);
+    } catch (uploadError) {
+      setError(uploadError.message);
+    } finally {
+      setScreenshotReading(false);
+    }
+  };
+
   const pending = transactions
     .filter((transaction) => (transaction.type === "lent" || transaction.type === "borrowed") && transaction.status === "pending")
     .sort((a, b) => a.date.localeCompare(b.date));
@@ -2744,7 +2786,11 @@ function Finance() {
     <div className="page">
       <div className="page-header">
         <div><h1>My Finances</h1><p>Track income, spending, and money to receive or repay.</p></div>
-        <Button className="finance-add-btn" onClick={() => { setEditing(null); setShowForm(true); }}>+ Add Transaction</Button>
+        <div className="finance-header-actions">
+          <input ref={screenshotInputRef} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" onChange={extractScreenshot} />
+          <Button className="finance-screenshot-btn" disabled={screenshotReading} onClick={() => screenshotInputRef.current?.click()}><Upload size={16} />{screenshotReading ? "Reading screenshot…" : "Upload Screenshot"}</Button>
+          <Button className="finance-add-btn" onClick={() => { setEditing(null); setScreenshotNote(""); setShowForm(true); }}>+ Add Transaction</Button>
+        </div>
       </div>
       {error && <div className="error">{error}</div>}
       <div className="finance-filter">
@@ -2760,24 +2806,25 @@ function Finance() {
       {pending.length > 0 && <Card className="finance-pending-section"><SectionTitle title="Pending repayments" /><div className="finance-pending-list">{pending.map((transaction) => <div className="finance-pending-row" key={transaction.id}><div><strong>{transaction.counterpartyName || "Unnamed contact"}</strong><span>{typeLabel[transaction.type]} · {transaction.date}</span></div><b>{formatCurrency(transaction.amount)}</b>{overdue(transaction) && <em>Overdue</em>}<Button variant="secondary" onClick={() => updateTransaction(transaction, { status: "settled" })}>Mark settled</Button></div>)}</div></Card>}
       <Card>
         <SectionTitle title="Transaction history" action={<span className="muted small">{transactions.length} entries</span>} />
-        {transactions.length === 0 ? <Empty icon={<WalletCards size={30} />} title="No transactions yet" text="Add your first income, expense, or lending entry." action={<Button onClick={() => setShowForm(true)}>Add Transaction</Button>} /> : <div className="finance-list">{transactions.map((transaction) => <div className={`finance-row finance-${transaction.type}`} key={transaction.id}><span className="finance-type">{typeLabel[transaction.type]}</span><div className="finance-row-main"><strong>{transaction.counterpartyName || transaction.category || "Personal transaction"}</strong><span>{transaction.paymentMode} · {transaction.category || "Other"}{transaction.note ? ` · ${transaction.note}` : ""}</span></div><b>{formatCurrency(transaction.amount)}</b><Button variant="secondary" onClick={() => { setEditing(transaction); setShowForm(true); }}>Edit</Button><Button variant="danger" onClick={() => deleteTransaction(transaction)}>Delete</Button></div>)}</div>}
+        {transactions.length === 0 ? <Empty icon={<WalletCards size={30} />} title="No transactions yet" text="Add your first income, expense, or lending entry." action={<Button onClick={() => setShowForm(true)}>Add Transaction</Button>} /> : <div className="finance-list">{transactions.map((transaction) => <div className={`finance-row finance-${transaction.type}`} key={transaction.id}><span className="finance-type">{typeLabel[transaction.type]}</span><div className="finance-row-main"><strong>{transaction.counterpartyName || transaction.category || "Personal transaction"}{transaction.sourceType === "screenshot" && <em className="finance-source-badge">Screenshot</em>}</strong><span>{transaction.paymentMode} · {transaction.category || "Other"}{transaction.note ? ` · ${transaction.note}` : ""}</span></div><b>{formatCurrency(transaction.amount)}</b><Button variant="secondary" onClick={() => { setEditing(transaction); setShowForm(true); }}>Edit</Button><Button variant="danger" onClick={() => deleteTransaction(transaction)}>Delete</Button></div>)}</div>}
       </Card>
-      {showForm && <FinanceForm transaction={editing} close={() => { setShowForm(false); setEditing(null); }} save={saveTransaction} />}
+      {showForm && <FinanceForm transaction={editing} note={screenshotNote} close={() => { setShowForm(false); setEditing(null); setScreenshotNote(""); }} save={saveTransaction} />}
     </div>
   );
 }
 
-function FinanceForm({ transaction, close, save }) {
-  const [form, setForm] = useState(transaction || { type: "expense", amount: "", counterpartyName: "", paymentMode: "UPI", category: "Other", date: new Date().toISOString().slice(0, 10), note: "", recurring: false });
+function FinanceForm({ transaction, note, close, save }) {
+  const [form, setForm] = useState(transaction || { type: "expense", amount: "", counterpartyName: "", paymentMode: "UPI", category: "Other", date: new Date().toISOString().slice(0, 10), note: "", recurring: false, sourceType: "manual" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const update = (key, value) => setForm((current) => ({ ...current, [key]: value }));
-  return <Modal title={transaction ? "Edit transaction" : "Add transaction"} close={close}><form className="finance-form" onSubmit={async (event) => { event.preventDefault(); setSaving(true); setError(""); try { await save(form); } catch (saveError) { setError(saveError.message); } finally { setSaving(false); } }}>
+  return <Modal title={transaction?.sourceType === "screenshot" ? "Review extracted transaction" : transaction ? "Edit transaction" : "Add transaction"} close={close}><form className="finance-form" onSubmit={async (event) => { event.preventDefault(); setSaving(true); setError(""); try { await save(form); } catch (saveError) { setError(saveError.message); } finally { setSaving(false); } }}>
+    {note && <p className="finance-extraction-note">{note}</p>}
     <div className="finance-type-selector">{FINANCE_TYPES.map((type) => <button type="button" className={form.type === type ? "active" : ""} key={type} onClick={() => update("type", type)}>{type[0].toUpperCase() + type.slice(1)}</button>)}</div>
     <label>Amount<input type="number" min="0.01" step="0.01" value={form.amount} onChange={(event) => update("amount", event.target.value)} required /></label>
     <label>Counterparty name<input value={form.counterpartyName} onChange={(event) => update("counterpartyName", event.target.value)} placeholder="Optional" /></label>
-    <label>Payment mode<select value={form.paymentMode} onChange={(event) => update("paymentMode", event.target.value)}>{PAYMENT_MODES.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
-    <label>Category<select value={form.category} onChange={(event) => update("category", event.target.value)}>{FINANCE_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></label>
+    <label>Payment mode<select value={form.paymentMode} onChange={(event) => update("paymentMode", event.target.value)}><option value="">Select payment mode</option>{PAYMENT_MODES.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
+    <label>Category<select value={form.category} onChange={(event) => update("category", event.target.value)}><option value="">Select category</option>{FINANCE_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></label>
     <label>Date<input type="date" value={form.date} onChange={(event) => update("date", event.target.value)} required /></label>
     <label>Note<textarea value={form.note} onChange={(event) => update("note", event.target.value)} placeholder="Optional description" rows="3" /></label>
     <label className="finance-recurring"><input type="checkbox" checked={Boolean(form.recurring)} onChange={(event) => update("recurring", event.target.checked)} /> Mark as recurring reminder</label>

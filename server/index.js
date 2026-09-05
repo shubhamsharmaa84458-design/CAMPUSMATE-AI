@@ -27,6 +27,11 @@ const upload = multer({
   storage: multer.memoryStorage(),
   fileFilter: (_req, file, cb) => cb(null, file.mimetype === 'application/pdf'),
 });
+const screenshotUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => cb(null, file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf'),
+});
 
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 const hasOpenAIKey = Boolean(OPENAI_KEY && !OPENAI_KEY.startsWith('replace-with-'));
@@ -528,9 +533,11 @@ async function initDb() {
       transaction_date DATE NOT NULL,
       status TEXT NOT NULL DEFAULT 'settled' CHECK (status IN ('pending', 'settled')),
       recurring BOOLEAN NOT NULL DEFAULT FALSE,
+      source_type TEXT NOT NULL DEFAULT 'manual' CHECK (source_type IN ('manual', 'screenshot')),
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
   `);
+  await dbClient.query("ALTER TABLE finance_transactions ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'manual'");
   console.log('Connected to DATABASE');
 }
 initDb().catch(e => { console.warn('DB init failed (continuing with file-based storage):', e.message || e); });
@@ -595,116 +602,105 @@ async function loadMessagesForEmail(email) {
     return r.rows[0].chat || [];
   }
 
-  const FINANCE_TYPES = new Set(['income', 'expense', 'lent', 'borrowed']);
-  const PAYMENT_MODES = new Set(['Cash', 'UPI', 'Bank Transfer', 'Card', 'Other']);
-  const FINANCE_CATEGORIES = new Set(['Food', 'Rent', 'Salary', 'Travel', 'Tuition', 'Other']);
-
-  function normalizeTransaction(input, existing = {}) {
-    const type = FINANCE_TYPES.has(input.type) ? input.type : existing.type;
-    const amount = Number(input.amount ?? existing.amount);
-    const paymentMode = PAYMENT_MODES.has(input.paymentMode) ? input.paymentMode : existing.paymentMode;
-    const date = String(input.date ?? existing.date ?? '').slice(0, 10);
-    if (!type || !Number.isFinite(amount) || amount <= 0 || !paymentMode || !date) {
-      return null;
-    }
-    const status = (type === 'lent' || type === 'borrowed')
-      ? (input.status === 'settled' || existing.status === 'settled' ? 'settled' : 'pending')
-      : 'settled';
-    return {
-      id: existing.id || input.id || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-      type,
-      amount: Math.round(amount * 100) / 100,
-      counterpartyName: String(input.counterpartyName ?? existing.counterpartyName ?? '').trim().slice(0, 160),
-      paymentMode,
-      category: FINANCE_CATEGORIES.has(input.category) ? input.category : String(input.category ?? existing.category ?? 'Other').trim().slice(0, 80) || 'Other',
-      note: String(input.note ?? existing.note ?? '').trim().slice(0, 1000),
-      date,
-      status,
-      recurring: Boolean(input.recurring ?? existing.recurring),
-      createdAt: existing.createdAt || input.createdAt || new Date().toISOString(),
-    };
-  }
-
-  async function listFinanceTransactions(email) {
-    const key = (email || '').trim().toLowerCase();
-    if (useDb && dbClient) {
-      const result = await dbClient.query('SELECT id, type, amount, counterparty_name, payment_mode, category, note, transaction_date, status, recurring, created_at FROM finance_transactions WHERE email = $1 ORDER BY transaction_date DESC, created_at DESC', [key]);
-      return result.rows.map((row) => ({
-        id: row.id, type: row.type, amount: Number(row.amount), counterpartyName: row.counterparty_name,
-        paymentMode: row.payment_mode, category: row.category, note: row.note,
-        date: String(row.transaction_date).slice(0, 10), status: row.status, recurring: row.recurring,
-        createdAt: row.created_at,
-      }));
-    }
-    return (loadFinance()[key] || []).sort((a, b) => `${b.date}${b.createdAt}`.localeCompare(`${a.date}${a.createdAt}`));
-  }
-
-  async function saveFinanceTransaction(email, transaction) {
-    const key = (email || '').trim().toLowerCase();
-    if (useDb && dbClient) {
-      await dbClient.query(`INSERT INTO finance_transactions
-        (id, email, type, amount, counterparty_name, payment_mode, category, note, transaction_date, status, recurring, created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-        ON CONFLICT (id) DO UPDATE SET type=$3, amount=$4, counterparty_name=$5, payment_mode=$6, category=$7, note=$8, transaction_date=$9, status=$10, recurring=$11`,
-      [transaction.id, key, transaction.type, transaction.amount, transaction.counterpartyName, transaction.paymentMode, transaction.category, transaction.note, transaction.date, transaction.status, transaction.recurring, transaction.createdAt]);
-      return transaction;
-    }
-    const all = loadFinance();
-    all[key] = (all[key] || []).filter((item) => item.id !== transaction.id);
-    all[key].push(transaction);
-    saveFinance(all);
-    return transaction;
-  }
-
-  async function deleteFinanceTransaction(email, id) {
-    const key = (email || '').trim().toLowerCase();
-    if (useDb && dbClient) {
-      const result = await dbClient.query('DELETE FROM finance_transactions WHERE id = $1 AND email = $2', [id, key]);
-      return result.rowCount > 0;
-    }
-    const all = loadFinance();
-    const before = all[key] || [];
-    all[key] = before.filter((item) => item.id !== id);
-    saveFinance(all);
-    return all[key].length !== before.length;
-  }
-
-  function filterFinanceTransactions(transactions, query) {
-    const today = new Date();
-    const range = query.range || 'all';
-    let from = query.from ? new Date(`${query.from}T00:00:00`) : null;
-    const to = query.to ? new Date(`${query.to}T23:59:59`) : null;
-    if (!from && range !== 'all') {
-      from = new Date(today);
-      from.setHours(0, 0, 0, 0);
-      from.setDate(from.getDate() - (range === 'week' ? 6 : 29));
-    }
-    return transactions.filter((transaction) => {
-      const date = new Date(`${transaction.date}T12:00:00`);
-      return (!from || date >= from) && (!to || date <= to) && (!query.type || transaction.type === query.type);
-    });
-  }
-
-  function summarizeFinanceTransactions(transactions) {
-    const summary = { totalIncome: 0, totalExpense: 0, netBalance: 0, totalPendingToReceive: 0, totalPendingToPay: 0, byCategory: {} };
-    for (const transaction of transactions) {
-      if (transaction.type === 'income') summary.totalIncome += transaction.amount;
-      if (transaction.type === 'expense') {
-        summary.totalExpense += transaction.amount;
-        summary.byCategory[transaction.category || 'Other'] = (summary.byCategory[transaction.category || 'Other'] || 0) + transaction.amount;
-      }
-      if (transaction.type === 'lent' && transaction.status === 'pending') summary.totalPendingToReceive += transaction.amount;
-      if (transaction.type === 'borrowed' && transaction.status === 'pending') summary.totalPendingToPay += transaction.amount;
-    }
-    summary.netBalance = summary.totalIncome - summary.totalExpense;
-    for (const key of Object.keys(summary)) {
-      if (key !== 'byCategory') summary[key] = Math.round(summary[key] * 100) / 100;
-    }
-    return summary;
-  }
-
   const all = loadAllMessages();
   return all[key] || [];
+}
+
+const FINANCE_TYPES = new Set(['income', 'expense', 'lent', 'borrowed']);
+const PAYMENT_MODES = new Set(['Cash', 'UPI', 'Bank Transfer', 'Card', 'Other']);
+const FINANCE_CATEGORIES = new Set(['Food', 'Rent', 'Salary', 'Travel', 'Tuition', 'Other']);
+
+function normalizeTransaction(input, existing = {}) {
+  const type = FINANCE_TYPES.has(input.type) ? input.type : existing.type;
+  const amount = Number(input.amount ?? existing.amount);
+  const paymentMode = PAYMENT_MODES.has(input.paymentMode) ? input.paymentMode : existing.paymentMode;
+  const date = String(input.date ?? existing.date ?? '').slice(0, 10);
+  if (!type || !Number.isFinite(amount) || amount <= 0 || !paymentMode || !date) return null;
+  const status = (type === 'lent' || type === 'borrowed')
+    ? (input.status === 'settled' || existing.status === 'settled' ? 'settled' : 'pending')
+    : 'settled';
+  return {
+    id: existing.id || input.id || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    type, amount: Math.round(amount * 100) / 100,
+    counterpartyName: String(input.counterpartyName ?? existing.counterpartyName ?? '').trim().slice(0, 160),
+    paymentMode,
+    category: FINANCE_CATEGORIES.has(input.category) ? input.category : String(input.category ?? existing.category ?? 'Other').trim().slice(0, 80) || 'Other',
+    note: String(input.note ?? existing.note ?? '').trim().slice(0, 1000),
+    date, status, recurring: Boolean(input.recurring ?? existing.recurring),
+    sourceType: input.sourceType === 'screenshot' || existing.sourceType === 'screenshot' ? 'screenshot' : 'manual',
+    createdAt: existing.createdAt || input.createdAt || new Date().toISOString(),
+  };
+}
+
+async function listFinanceTransactions(email) {
+  const key = (email || '').trim().toLowerCase();
+  if (useDb && dbClient) {
+    const result = await dbClient.query('SELECT id, type, amount, counterparty_name, payment_mode, category, note, transaction_date, status, recurring, source_type, created_at FROM finance_transactions WHERE email = $1 ORDER BY transaction_date DESC, created_at DESC', [key]);
+    return result.rows.map((row) => ({ id: row.id, type: row.type, amount: Number(row.amount), counterpartyName: row.counterparty_name, paymentMode: row.payment_mode, category: row.category, note: row.note, date: String(row.transaction_date).slice(0, 10), status: row.status, recurring: row.recurring, sourceType: row.source_type, createdAt: row.created_at }));
+  }
+  return (loadFinance()[key] || []).sort((a, b) => `${b.date}${b.createdAt}`.localeCompare(`${a.date}${a.createdAt}`));
+}
+
+async function saveFinanceTransaction(email, transaction) {
+  const key = (email || '').trim().toLowerCase();
+  if (useDb && dbClient) {
+    await dbClient.query(`INSERT INTO finance_transactions
+      (id, email, type, amount, counterparty_name, payment_mode, category, note, transaction_date, status, recurring, source_type, created_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      ON CONFLICT (id) DO UPDATE SET type=$3, amount=$4, counterparty_name=$5, payment_mode=$6, category=$7, note=$8, transaction_date=$9, status=$10, recurring=$11, source_type=$12`,
+    [transaction.id, key, transaction.type, transaction.amount, transaction.counterpartyName, transaction.paymentMode, transaction.category, transaction.note, transaction.date, transaction.status, transaction.recurring, transaction.sourceType, transaction.createdAt]);
+    return transaction;
+  }
+  const all = loadFinance();
+  all[key] = (all[key] || []).filter((item) => item.id !== transaction.id);
+  all[key].push(transaction);
+  saveFinance(all);
+  return transaction;
+}
+
+async function deleteFinanceTransaction(email, id) {
+  const key = (email || '').trim().toLowerCase();
+  if (useDb && dbClient) {
+    const result = await dbClient.query('DELETE FROM finance_transactions WHERE id = $1 AND email = $2', [id, key]);
+    return result.rowCount > 0;
+  }
+  const all = loadFinance();
+  const before = all[key] || [];
+  all[key] = before.filter((item) => item.id !== id);
+  saveFinance(all);
+  return all[key].length !== before.length;
+}
+
+function filterFinanceTransactions(transactions, query) {
+  const today = new Date();
+  const range = query.range || 'all';
+  let from = query.from ? new Date(`${query.from}T00:00:00`) : null;
+  const to = query.to ? new Date(`${query.to}T23:59:59`) : null;
+  if (!from && range !== 'all') {
+    from = new Date(today);
+    from.setHours(0, 0, 0, 0);
+    from.setDate(from.getDate() - (range === 'week' ? 6 : 29));
+  }
+  return transactions.filter((transaction) => {
+    const date = new Date(`${transaction.date}T12:00:00`);
+    return (!from || date >= from) && (!to || date <= to) && (!query.type || transaction.type === query.type);
+  });
+}
+
+function summarizeFinanceTransactions(transactions) {
+  const summary = { totalIncome: 0, totalExpense: 0, netBalance: 0, totalPendingToReceive: 0, totalPendingToPay: 0, byCategory: {} };
+  for (const transaction of transactions) {
+    if (transaction.type === 'income') summary.totalIncome += transaction.amount;
+    if (transaction.type === 'expense') {
+      summary.totalExpense += transaction.amount;
+      summary.byCategory[transaction.category || 'Other'] = (summary.byCategory[transaction.category || 'Other'] || 0) + transaction.amount;
+    }
+    if (transaction.type === 'lent' && transaction.status === 'pending') summary.totalPendingToReceive += transaction.amount;
+    if (transaction.type === 'borrowed' && transaction.status === 'pending') summary.totalPendingToPay += transaction.amount;
+  }
+  summary.netBalance = summary.totalIncome - summary.totalExpense;
+  for (const key of Object.keys(summary)) if (key !== 'byCategory') summary[key] = Math.round(summary[key] * 100) / 100;
+  return summary;
 }
 
 // rate limiter (per IP by default)
@@ -874,6 +870,85 @@ app.get('/api/messages', authMiddleware, async (req, res) => {
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: 'db error' });
+  }
+});
+
+function parseAiJson(text) {
+  const cleaned = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  return JSON.parse(cleaned.slice(start, end + 1));
+}
+
+function screenshotUploadMiddleware(req, res, next) {
+  screenshotUpload.single('screenshot')(req, res, (error) => {
+    if (error) {
+      if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'Screenshot must be 10 MB or smaller' });
+      }
+      return res.status(400).json({ error: 'Please upload an image or PDF screenshot' });
+    }
+    return next();
+  });
+}
+
+app.post('/api/finance/extract-screenshot', authMiddleware, screenshotUploadMiddleware, async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'A screenshot file is required' });
+  if (!hasGeminiKey && !process.env.ANTHROPIC_API_KEY && !hasOpenAIKey) {
+    return res.status(503).json({ error: 'No AI provider configured for screenshot reading' });
+  }
+
+  const mediaType = req.file.mimetype;
+  const extractionPrompt = `Extract payment details visible in this screenshot. Return ONLY valid JSON with exactly these keys:
+{"amount": number|null, "date": "YYYY-MM-DD"|null, "paymentMode": "Cash"|"UPI"|"Bank Transfer"|"Card"|"Other"|null, "counterpartyName": string|null, "note": string|null, "type": "income"|"expense"|null}
+Use null when a value is not visible. Type is expense when money was sent and income when money was received. Do not invent values.`;
+  try {
+    let text = '';
+    if (process.env.ANTHROPIC_API_KEY) {
+      const content = mediaType === 'application/pdf'
+        ? [{ type: 'document', source: { type: 'base64', media_type: mediaType, data: req.file.buffer.toString('base64') } }, { type: 'text', text: extractionPrompt }]
+        : [{ type: 'image', source: { type: 'base64', media_type: mediaType, data: req.file.buffer.toString('base64') } }, { type: 'text', text: extractionPrompt }];
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: 'claude-3-5-sonnet-latest', max_tokens: 500, messages: [{ role: 'user', content }] }),
+      });
+      if (!response.ok) throw new Error(`Anthropic request failed (${response.status})`);
+      const body = await response.json();
+      text = body?.content?.map((block) => block?.text || '').join('') || '';
+    } else if (hasGeminiKey) {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: extractionPrompt }, { inline_data: { mime_type: mediaType, data: req.file.buffer.toString('base64') } }] }] }),
+      });
+      if (!response.ok) throw new Error(`Gemini request failed (${response.status})`);
+      const body = await response.json();
+      text = body?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '';
+    } else {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
+        body: JSON.stringify({ model: OPENAI_MODEL, messages: [{ role: 'user', content: [{ type: 'text', text: extractionPrompt }, { type: mediaType === 'application/pdf' ? 'file' : 'image_url', ...(mediaType === 'application/pdf' ? { file: { filename: req.file.originalname, file_data: `data:${mediaType};base64,${req.file.buffer.toString('base64')}` } } : { image_url: { url: `data:${mediaType};base64,${req.file.buffer.toString('base64')}` } }) }] }], response_format: { type: 'json_object' } }),
+      });
+      if (!response.ok) throw new Error(`OpenAI request failed (${response.status})`);
+      const body = await response.json();
+      text = body?.choices?.[0]?.message?.content || '';
+    }
+    const extracted = parseAiJson(text);
+    if (!extracted || typeof extracted !== 'object') return res.status(500).json({ error: 'AI returned invalid screenshot details' });
+    return res.json({ extracted: {
+      amount: Number.isFinite(Number(extracted.amount)) && Number(extracted.amount) > 0 ? Number(extracted.amount) : null,
+      date: /^\d{4}-\d{2}-\d{2}$/.test(String(extracted.date || '')) ? extracted.date : null,
+      paymentMode: PAYMENT_MODES.has(extracted.paymentMode) ? extracted.paymentMode : null,
+      counterpartyName: extracted.counterpartyName ? String(extracted.counterpartyName).trim().slice(0, 160) : null,
+      note: extracted.note ? String(extracted.note).trim().slice(0, 1000) : null,
+      type: FINANCE_TYPES.has(extracted.type) && extracted.type !== 'lent' && extracted.type !== 'borrowed' ? extracted.type : null,
+    } });
+  } catch (error) {
+    console.error('Finance screenshot extraction failed:', error);
+    return res.status(500).json({ error: 'Unable to read payment details from this screenshot' });
   }
 });
 
