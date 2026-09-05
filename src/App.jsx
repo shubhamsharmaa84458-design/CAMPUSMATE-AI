@@ -132,8 +132,26 @@ async function readApiResponse(response, fallbackMessage) {
         : `${fallbackMessage} (server returned ${response.status})`
     );
   }
+
   if (!response.ok) throw new Error(payload.error || fallbackMessage);
   return payload;
+}
+
+function formatExtractedNotes(text) {
+  return String(text || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .reduce((formatted, line) => {
+      const isHeading = /^(?:#{1,6}\s+|(?:unit|chapter|module|topic|section|subject)\s*[:.-]?\s+|\d+(?:\.\d+)*[.)]?\s+|[A-Z][A-Z0-9\s&-]{3,})/i.test(line);
+      if (isHeading && formatted.length && formatted[formatted.length - 1] !== "") formatted.push("");
+      formatted.push(line);
+      if (isHeading) formatted.push("");
+      return formatted;
+    }, [])
+    .join("\n")
+    .trim();
 }
 
 function Button({
@@ -2039,7 +2057,7 @@ function Notes({ data, updateData }) {
           close={() => setSelectedNote(null)}
         >
           <p className="small muted">{selectedNote.name}</p>
-          <pre className="syllabus-modal-preview">{selectedNote.text || "No text was found."}</pre>
+          <pre className="syllabus-modal-preview">{formatExtractedNotes(selectedNote.text) || "No text was found."}</pre>
         </Modal>
       )}
     </div>
