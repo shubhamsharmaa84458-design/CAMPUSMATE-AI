@@ -39,6 +39,16 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const hasGeminiKey = Boolean(GEMINI_KEY && !GEMINI_KEY.startsWith('replace-with-'));
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+const AI_RATE_LIMIT_MESSAGE = 'All AI providers are currently rate-limited, please try again in a minute';
+const aiRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 15,
+  limit: 15,
+  keyGenerator: (req) => req.user?.email || req.ip || 'anonymous',
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many AI requests. Please wait a minute before trying again.' },
+});
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET || JWT_SECRET.length < 32) {
   console.error("JWT_SECRET must be set to a random value of at least 32 characters.");
@@ -46,6 +56,82 @@ if (!JWT_SECRET || JWT_SECRET.length < 32) {
 }
 if (!hasOpenAIKey) {
   console.warn("Warning: OPENAI_API_KEY is missing or still a placeholder. Configure server/.env before using AI.");
+}
+
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function sendSse(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function parseRetryDelayMs(response, body) {
+  const header = response?.headers?.get?.('retry-after');
+  if (header) {
+    const sec = Number(header);
+    if (Number.isFinite(sec) && sec > 0) return sec * 1000;
+  }
+  if (body) {
+    const details = body?.error?.details;
+    if (Array.isArray(details)) {
+      const info = details.find((item) => item?.retryDelay || item?.['@type']?.includes('RetryInfo'));
+      if (info?.retryDelay) {
+        const match = String(info.retryDelay).match(/^([0-9.]+)\s*s?$/i);
+        if (match) {
+          const sec = parseFloat(match[1]);
+          if (Number.isFinite(sec) && sec > 0) return sec * 1000;
+        }
+      }
+    }
+  }
+  return 1000;
+}
+
+async function requestProvider(provider, url, options, route = 'request') {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(url, options);
+    } catch (error) {
+      console.error(`[AI] ${provider} network error on ${route}:`, error.message || error);
+      throw error;
+    }
+
+    if (response.status !== 429) {
+      if (response.ok) {
+        console.log(`[AI] ${provider} served ${route}`);
+      } else {
+        console.warn(`[AI] ${provider} returned status ${response.status} on ${route}`);
+      }
+      return response;
+    }
+
+    // response.status is 429
+    if (attempt === 1) {
+      console.warn(`[AI] ${provider} rate-limited (429) after retry on ${route}; falling through to next provider`);
+      return response;
+    }
+
+    let retryDelay = 1000;
+    try {
+      const cloned = response.clone();
+      const body = await cloned.json().catch(() => null);
+      retryDelay = parseRetryDelayMs(response, body);
+    } catch {
+      // response body could not be parsed as json
+    }
+
+    const delay = Math.min(Math.max(Math.round(retryDelay), 500), 5000);
+    console.warn(`[AI] ${provider} returned 429 on ${route}; retrying in ${delay}ms...`);
+    await wait(delay);
+  }
+}
+
+function rateLimitError(res) {
+  if (res.headersSent) {
+    sendSse(res, { type: 'error', body: AI_RATE_LIMIT_MESSAGE });
+    return res.end();
+  }
+  return res.status(429).json({ error: AI_RATE_LIMIT_MESSAGE });
 }
 
 // Keep persistent files next to the server regardless of the process cwd.
@@ -150,11 +236,15 @@ ${text.slice(0, 50000)}`;
     let responseText = '';
     if (hasGeminiKey) {
       for (const model of await getGeminiModels()) {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+        const response = await requestProvider('gemini', `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-        });
+        }, 'parseSyllabusWithAI');
+        if (response.status === 429) {
+          console.warn('[AI] Gemini quota exhausted during syllabus parsing; falling back to OpenAI');
+          break;
+        }
         if (response.ok) {
           const payload = await response.json();
           responseText = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '';
@@ -163,7 +253,7 @@ ${text.slice(0, 50000)}`;
       }
     }
     if (!responseText && hasOpenAIKey) {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      const response = await requestProvider('openai', 'https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
         body: JSON.stringify({
@@ -171,7 +261,7 @@ ${text.slice(0, 50000)}`;
           messages: [{ role: 'user', content: prompt }],
           response_format: { type: 'json_object' },
         }),
-      });
+      }, 'parseSyllabusWithAI');
       if (response.ok) {
         const payload = await response.json();
         responseText = payload?.choices?.[0]?.message?.content || '';
@@ -281,22 +371,26 @@ async function extractPdfWithGemini(buffer, kind = 'syllabus') {
   const models = await getGeminiModels();
   for (const model of models) {
     try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: prompt },
-            { inlineData: { mimeType: 'application/pdf', data: Buffer.from(buffer).toString('base64') } },
-          ],
-        }],
-      }),
-    });
-    if (!response.ok) continue;
-    const payload = await response.json();
-    const text = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('\n').trim() || '';
-    if (isUsablePdfText(text)) return text;
+      const response = await requestProvider('gemini', `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { text: prompt },
+              { inlineData: { mimeType: 'application/pdf', data: Buffer.from(buffer).toString('base64') } },
+            ],
+          }],
+        }),
+      }, 'extractPdfWithGemini');
+      if (response.status === 429) {
+        console.warn('[AI] Gemini quota exhausted during PDF extraction; falling back to OpenAI');
+        break;
+      }
+      if (!response.ok) continue;
+      const payload = await response.json();
+      const text = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('\n').trim() || '';
+      if (isUsablePdfText(text)) return text;
     } catch (error) {
       console.error(`Gemini PDF extraction failed with ${model}:`, error);
     }
@@ -328,7 +422,7 @@ async function extractPdfWithOpenAI(buffer, kind = 'syllabus') {
     ? 'Read this scanned chapter or study-notes PDF and transcribe all visible text in order. Preserve headings, lists, tables, and formulas where possible. Return only the extracted text.'
     : 'Read this scanned syllabus PDF and extract every visible subject and chapter, unit, or topic. Return only this format with no commentary: SUBJECT: <subject name> followed by TOPIC: <topic name> lines.';
   try {
-    const response = await fetch('https://api.openai.com/v1/responses', {
+    const response = await requestProvider('openai', 'https://api.openai.com/v1/responses', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${OPENAI_KEY}`,
@@ -344,7 +438,7 @@ async function extractPdfWithOpenAI(buffer, kind = 'syllabus') {
           ],
         }],
       }),
-    });
+    }, 'extractPdfWithOpenAI');
     if (!response.ok) {
       console.error('OpenAI PDF extraction failed:', response.status, await response.text());
       return '';
@@ -893,7 +987,7 @@ function screenshotUploadMiddleware(req, res, next) {
   });
 }
 
-app.post('/api/finance/extract-screenshot', authMiddleware, screenshotUploadMiddleware, async (req, res) => {
+app.post('/api/finance/extract-screenshot', authMiddleware, aiRateLimit, screenshotUploadMiddleware, async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'A screenshot file is required' });
   if (!hasGeminiKey && !process.env.ANTHROPIC_API_KEY && !hasOpenAIKey) {
     return res.status(503).json({ error: 'No AI provider configured for screenshot reading' });
@@ -905,37 +999,60 @@ app.post('/api/finance/extract-screenshot', authMiddleware, screenshotUploadMidd
 Use null when a value is not visible. Type is expense when money was sent and income when money was received. Do not invent values.`;
   try {
     let text = '';
+    let rateLimitedProviders = 0;
+    let totalConfigured = 0;
     if (process.env.ANTHROPIC_API_KEY) {
+      totalConfigured += 1;
       const content = mediaType === 'application/pdf'
         ? [{ type: 'document', source: { type: 'base64', media_type: mediaType, data: req.file.buffer.toString('base64') } }, { type: 'text', text: extractionPrompt }]
         : [{ type: 'image', source: { type: 'base64', media_type: mediaType, data: req.file.buffer.toString('base64') } }, { type: 'text', text: extractionPrompt }];
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const response = await requestProvider('anthropic', 'https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({ model: 'claude-3-5-sonnet-latest', max_tokens: 500, messages: [{ role: 'user', content }] }),
-      });
-      if (!response.ok) throw new Error(`Anthropic request failed (${response.status})`);
-      const body = await response.json();
-      text = body?.content?.map((block) => block?.text || '').join('') || '';
-    } else if (hasGeminiKey) {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+      }, '/api/finance/extract-screenshot');
+      if (response.ok) {
+        const body = await response.json();
+        text = body?.content?.map((block) => block?.text || '').join('') || '';
+      } else if (response.status === 429) {
+        rateLimitedProviders += 1;
+      } else {
+        throw new Error(`Anthropic request failed (${response.status})`);
+      }
+    }
+    if (!text && hasGeminiKey) {
+      totalConfigured += 1;
+      const response = await requestProvider('gemini', `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contents: [{ parts: [{ text: extractionPrompt }, { inline_data: { mime_type: mediaType, data: req.file.buffer.toString('base64') } }] }] }),
-      });
-      if (!response.ok) throw new Error(`Gemini request failed (${response.status})`);
-      const body = await response.json();
-      text = body?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '';
-    } else {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      }, '/api/finance/extract-screenshot');
+      if (response.ok) {
+        const body = await response.json();
+        text = body?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '';
+      } else if (response.status === 429) {
+        rateLimitedProviders += 1;
+      } else {
+        throw new Error(`Gemini request failed (${response.status})`);
+      }
+    }
+    if (!text && hasOpenAIKey) {
+      totalConfigured += 1;
+      const response = await requestProvider('openai', 'https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
         body: JSON.stringify({ model: OPENAI_MODEL, messages: [{ role: 'user', content: [{ type: 'text', text: extractionPrompt }, { type: mediaType === 'application/pdf' ? 'file' : 'image_url', ...(mediaType === 'application/pdf' ? { file: { filename: req.file.originalname, file_data: `data:${mediaType};base64,${req.file.buffer.toString('base64')}` } } : { image_url: { url: `data:${mediaType};base64,${req.file.buffer.toString('base64')}` } }) }] }], response_format: { type: 'json_object' } }),
-      });
-      if (!response.ok) throw new Error(`OpenAI request failed (${response.status})`);
-      const body = await response.json();
-      text = body?.choices?.[0]?.message?.content || '';
+      }, '/api/finance/extract-screenshot');
+      if (response.ok) {
+        const body = await response.json();
+        text = body?.choices?.[0]?.message?.content || '';
+      } else if (response.status === 429) {
+        rateLimitedProviders += 1;
+      } else {
+        throw new Error(`OpenAI request failed (${response.status})`);
+      }
     }
+    if (!text && rateLimitedProviders > 0 && rateLimitedProviders === totalConfigured) return rateLimitError(res);
     const extracted = parseAiJson(text);
     if (!extracted || typeof extracted !== 'object') return res.status(500).json({ error: 'AI returned invalid screenshot details' });
     return res.json({ extracted: {
@@ -1010,7 +1127,7 @@ app.get('/api/finance/summary', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/quiz-generate', authMiddleware, async (req, res) => {
+app.post('/api/quiz-generate', authMiddleware, aiRateLimit, async (req, res) => {
   const topics = Array.isArray(req.body?.topics) ? req.body.topics.filter(Boolean) : [];
   const pool = topics.length ? [...new Set(topics)] : ['Data Structures', 'DBMS', 'Computer Networks'];
   const materials = Array.isArray(req.body?.materials) ? req.body.materials : [];
@@ -1040,22 +1157,31 @@ Chapter notes:
 ${materialText || 'No chapter notes supplied.'}`;
   try {
     let payload;
+    let rateLimitedProviders = 0;
+    let totalConfigured = 0;
     if (hasGeminiKey) {
+      totalConfigured += 1;
       for (const model of await getGeminiModels()) {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+        const response = await requestProvider('gemini', `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ contents: [{ parts: [{ text: quizPrompt }] }] }),
-        });
-        if (response.ok) {
+        }, '/api/quiz-generate');
+        if (response.status === 429) {
+          rateLimitedProviders += 1;
+          console.warn('[AI] Gemini quota exhausted for quiz generation; falling back to next provider');
+          break;
+        } else if (response.ok) {
           const body = await response.json();
           const text = body?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
           payload = JSON.parse(text.replace(/^```json\s*|\s*```$/g, ''));
           if (payload?.questions) break;
         }
       }
-    } else if (process.env.ANTHROPIC_API_KEY) {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+    }
+    if (!payload && process.env.ANTHROPIC_API_KEY) {
+      totalConfigured += 1;
+      const response = await requestProvider('anthropic', 'https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({
@@ -1063,14 +1189,19 @@ ${materialText || 'No chapter notes supplied.'}`;
           max_tokens: 1800,
           messages: [{ role: 'user', content: quizPrompt }],
         }),
-      });
-      if (response.ok) {
+      }, '/api/quiz-generate');
+      if (response.status === 429) {
+        rateLimitedProviders += 1;
+        console.warn('[AI] Anthropic quota exhausted for quiz generation; falling back to next provider');
+      } else if (response.ok) {
         const body = await response.json();
         const text = body?.content?.map((block) => block?.text || '').join('').trim() || '';
         payload = JSON.parse(text.replace(/^```json\s*|\s*```$/g, ''));
       }
-    } else if (hasOpenAIKey) {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    }
+    if (!payload && hasOpenAIKey) {
+      totalConfigured += 1;
+      const response = await requestProvider('openai', 'https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
         body: JSON.stringify({
@@ -1078,12 +1209,16 @@ ${materialText || 'No chapter notes supplied.'}`;
           messages: [{ role: 'user', content: quizPrompt }],
           response_format: { type: 'json_object' },
         }),
-      });
-      if (response.ok) {
+      }, '/api/quiz-generate');
+      if (response.status === 429) {
+        rateLimitedProviders += 1;
+        console.warn('[AI] OpenAI quota exhausted for quiz generation');
+      } else if (response.ok) {
         const body = await response.json();
         payload = JSON.parse(body?.choices?.[0]?.message?.content || '{}');
       }
     }
+    if (!payload && rateLimitedProviders > 0 && rateLimitedProviders === totalConfigured) return rateLimitError(res);
     const aiQuestions = payload?.questions;
     if (Array.isArray(aiQuestions) && aiQuestions.length) {
       const questionTexts = new Set();
@@ -1214,29 +1349,113 @@ ${materialText || 'No chapter notes supplied.'}`;
 });
 
 // Non-streaming AI endpoint (requires auth)
-app.post('/api/ai', authMiddleware, async (req, res) => {
+app.post('/api/ai', authMiddleware, aiRateLimit, async (req, res) => {
   try {
     const { prompt, context } = req.body || {};
     if (!prompt) return res.status(400).json({ error: 'Missing prompt' });
 
     const systemMsg = `You are CampusMate AI, a helpful study assistant aware of the user's tracked subjects, weak topics, and planner. Use the provided context to tailor concise study advice.`;
-    const messages = [ { role: 'system', content: systemMsg }, { role: 'user', content: `${JSON.stringify(context||{})}\n\nUser: ${prompt}` } ];
+    let reply = '';
+    let rateLimitedCount = 0;
+    let totalConfigured = 0;
 
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
-      body: JSON.stringify({ model: OPENAI_MODEL, messages })
-    });
+    if (hasOpenAIKey) {
+      totalConfigured += 1;
+      try {
+        const messages = [ { role: 'system', content: systemMsg }, { role: 'user', content: `${JSON.stringify(context||{})}\n\nUser: ${prompt}` } ];
+        const response = await requestProvider('openai', 'https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
+          body: JSON.stringify({ model: OPENAI_MODEL, messages })
+        }, '/api/ai');
 
-    if (!response.ok) {
-      const body = await response.text();
-      console.error('OpenAI error:', response.status, body);
-      return res.status(502).json({ error: 'OpenAI API error', status: response.status, body });
+        if (response.status === 429) {
+          rateLimitedCount += 1;
+          console.warn('[AI] OpenAI quota exhausted in /api/ai; falling back to next provider');
+        } else if (!response.ok) {
+          const body = await response.text();
+          return res.status(502).json({ error: 'OpenAI API error', status: response.status, body });
+        } else {
+          const payload = await response.json();
+          reply = payload?.choices?.[0]?.message?.content?.trim() || '';
+          if (reply) return res.json({ reply });
+        }
+      } catch (err) {
+        console.error('OpenAI error in /api/ai:', err);
+      }
     }
 
-    const payload = await response.json();
-    const reply = payload?.choices?.[0]?.message?.content?.trim() || '';
-    return res.json({ reply });
+    if (!reply && hasGeminiKey) {
+      totalConfigured += 1;
+      try {
+        const response = await requestProvider('gemini', `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemMsg }] },
+            contents: [{ parts: [{ text: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }] }],
+          }),
+        }, '/api/ai');
+
+        if (response.status === 429) {
+          rateLimitedCount += 1;
+          console.warn('[AI] Gemini quota exhausted in /api/ai; falling back to next provider');
+        } else if (!response.ok) {
+          const body = await response.text();
+          return res.status(502).json({ error: 'Gemini API error', status: response.status, body });
+        } else {
+          const payload = await response.json();
+          reply = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
+          if (reply) return res.json({ reply });
+        }
+      } catch (err) {
+        console.error('Gemini error in /api/ai:', err);
+      }
+    }
+
+    if (!reply && process.env.ANTHROPIC_API_KEY) {
+      totalConfigured += 1;
+      try {
+        const resp = await requestProvider('anthropic', 'https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': process.env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: 'claude-sonnet-5',
+            max_tokens: 500,
+            system: systemMsg,
+            messages: [{ role: 'user', content: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }],
+          }),
+        }, '/api/ai');
+
+        if (resp.status === 429) {
+          rateLimitedCount += 1;
+          console.warn('[AI] Anthropic quota exhausted in /api/ai');
+        } else if (!resp.ok) {
+          const body = await resp.text();
+          return res.status(502).json({ error: 'Anthropic API error', status: resp.status, body });
+        } else {
+          const payload = await resp.json();
+          reply = payload?.content?.map((block) => block?.text || '').join('').trim() || '';
+          if (reply) return res.json({ reply });
+        }
+      } catch (err) {
+        console.error('Anthropic error in /api/ai:', err);
+      }
+    }
+
+    if (totalConfigured > 0 && rateLimitedCount === totalConfigured) {
+      return rateLimitError(res);
+    }
+
+    if (totalConfigured === 0) {
+      return res.status(503).json({ error: 'No AI provider configured' });
+    }
+
+    return res.status(502).json({ error: 'No AI provider returned a reply' });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: 'Internal server error' });
@@ -1245,7 +1464,7 @@ app.post('/api/ai', authMiddleware, async (req, res) => {
 
 // Simulated streaming endpoint for local testing (does not call OpenAI).
 // Useful when OPENAI_API_KEY is not set.
-app.post('/api/ai-stream-sim', authMiddleware, async (req, res) => {
+app.post('/api/ai-stream-sim', authMiddleware, aiRateLimit, async (req, res) => {
   try {
     const { prompt } = req.body || {};
     res.setHeader('Content-Type', 'text/event-stream');
@@ -1268,80 +1487,237 @@ app.post('/api/ai-stream-sim', authMiddleware, async (req, res) => {
   }
 });
 
-// Streaming endpoint: forwards OpenAI streaming chunks as SSE-style data events (JSON payloads)
-app.post('/api/ai-stream', authMiddleware, async (req, res) => {
-  try {
-    const { prompt, context } = req.body || {};
-    if (!prompt) return res.status(400).json({ error: 'Missing prompt' });
-    if (!OPENAI_KEY) return res.status(500).json({ error: 'OpenAI key not configured' });
+async function streamOpenAI(prompt, context, res, route = '/api/ai-stream-v2') {
+  const url = 'https://api.openai.com/v1/chat/completions';
+  const options = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: 'system', content: 'You are CampusMate AI, a helpful study assistant aware of the user context.' },
+        { role: 'user', content: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` },
+      ],
+      stream: true,
+    }),
+  };
 
+  const response = await requestProvider('openai', url, options, route);
+  if (response.status === 429) {
+    return { rateLimited: true };
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`OpenAI streaming request failed (${response.status}): ${text}`);
+  }
+
+  if (!res.headersSent) {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
+  }
 
-    const systemMsg = `You are CampusMate AI, a helpful study assistant aware of the user's tracked subjects, weak topics, and planner. Use the provided context to tailor concise study advice.`;
-    const messages = [ { role: 'system', content: systemMsg }, { role: 'user', content: `${JSON.stringify(context||{})}\n\nUser: ${prompt}` } ];
-
-    const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
-      body: JSON.stringify({ model: OPENAI_MODEL, messages, stream: true })
-    });
-
-    if (!openaiRes.ok) {
-      const text = await openaiRes.text();
-      res.write(`data: ${JSON.stringify({ type: 'error', status: openaiRes.status, body: text })}\n\n`);
-      return res.end();
+  let buffer = '';
+  for await (const chunk of response.body) {
+    buffer += chunk.toString('utf8');
+    const events = buffer.split('\n\n');
+    buffer = events.pop() || '';
+    for (const event of events) {
+      const data = event.replace(/^data:\s*/m, '').trim();
+      if (!data || data === '[DONE]') continue;
+      try {
+        const payload = JSON.parse(data);
+        const text = payload?.choices?.[0]?.delta?.content;
+        if (text) sendSse(res, { type: 'delta', text });
+      } catch {
+        // ignore JSON parse error in streaming chunks
+      }
     }
+  }
+  return { success: true };
+}
 
-    let buffer = '';
-    for await (const chunk of openaiRes.body) {
-      buffer += chunk.toString('utf8');
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop();
+async function streamAnthropic(prompt, context, res, route = '/api/ai-stream-v2') {
+  const url = 'https://api.anthropic.com/v1/messages';
+  const options = {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-5',
+      max_tokens: 500,
+      stream: true,
+      system: 'You are CampusMate AI, a helpful study assistant aware of the user context.',
+      messages: [{ role: 'user', content: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }],
+    }),
+  };
 
-      for (const part of parts) {
-        if (!part.startsWith('data:')) continue;
-        const data = part.replace(/^data:\s*/, '').trim();
-        if (data === '[DONE]') {
-          res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
-          return res.end();
-        }
-        try {
-          const parsed = JSON.parse(data);
-          const delta = parsed?.choices?.[0]?.delta?.content;
-          if (delta) {
-            res.write(`data: ${JSON.stringify({ type: 'delta', text: delta })}\n\n`);
-          }
-          const meta = parsed?.choices?.[0]?.delta?.role || parsed?.choices?.[0]?.finish_reason;
-          if (meta) {
-            res.write(`data: ${JSON.stringify({ type: 'meta', meta })}\n\n`);
-          }
-        } catch (e) {
-          res.write(`data: ${JSON.stringify({ type: 'delta', text: data })}\n\n`);
-        }
+  const response = await requestProvider('anthropic', url, options, route);
+  if (response.status === 429) {
+    return { rateLimited: true };
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`Anthropic streaming request failed (${response.status}): ${text}`);
+  }
+
+  if (!res.headersSent) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+  }
+
+  let buffer = '';
+  for await (const chunk of response.body) {
+    buffer += chunk.toString('utf8');
+    const events = buffer.split('\n\n');
+    buffer = events.pop() || '';
+    for (const event of events) {
+      const data = event.split('\n').find((line) => line.startsWith('data:'))?.replace(/^data:\s*/, '');
+      if (!data) continue;
+      try {
+        const payload = JSON.parse(data);
+        const text = payload?.type === 'content_block_delta' ? payload?.delta?.text : '';
+        if (text) sendSse(res, { type: 'delta', text });
+      } catch {
+        // ignore JSON parse error in streaming chunks
+      }
+    }
+  }
+  return { success: true };
+}
+
+async function streamGemini(prompt, context, res, route = '/api/ai-stream-v2') {
+  const model = GEMINI_MODEL;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(GEMINI_KEY)}`;
+  const options = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: 'You are CampusMate AI, a helpful study assistant aware of the user context.' }] },
+      contents: [{ parts: [{ text: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }] }],
+    }),
+  };
+
+  const response = await requestProvider('gemini', url, options, route);
+  if (response.status === 429) {
+    return { rateLimited: true };
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`Gemini streaming request failed (${response.status}): ${text}`);
+  }
+
+  if (!res.headersSent) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+  }
+
+  let buffer = '';
+  for await (const chunk of response.body) {
+    buffer += chunk.toString('utf8');
+    const events = buffer.split('\n\n');
+    buffer = events.pop() || '';
+    for (const event of events) {
+      const data = event.replace(/^data:\s*/m, '').trim();
+      if (!data) continue;
+      try {
+        const payload = JSON.parse(data);
+        const text = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '';
+        if (text) sendSse(res, { type: 'delta', text });
+      } catch {
+        // ignore JSON parse error in streaming chunks
+      }
+    }
+  }
+  return { success: true };
+}
+
+// Streaming endpoint: forwards streaming chunks as SSE-style data events (JSON payloads)
+app.post('/api/ai-stream', authMiddleware, aiRateLimit, async (req, res) => {
+  try {
+    const { prompt, context } = req.body || {};
+    if (!prompt) return res.status(400).json({ error: 'Missing prompt' });
+
+    let served = false;
+    let rateLimitedCount = 0;
+    let totalConfigured = 0;
+
+    if (hasOpenAIKey) {
+      totalConfigured += 1;
+      const result = await streamOpenAI(prompt, context, res, '/api/ai-stream');
+      if (result.success) served = true;
+      else if (result.rateLimited) {
+        rateLimitedCount += 1;
+        console.warn('[AI] OpenAI quota exhausted in /api/ai-stream; falling back to next provider');
       }
     }
 
-    res.end();
+    if (!served && hasGeminiKey) {
+      totalConfigured += 1;
+      const result = await streamGemini(prompt, context, res, '/api/ai-stream');
+      if (result.success) served = true;
+      else if (result.rateLimited) {
+        rateLimitedCount += 1;
+        console.warn('[AI] Gemini quota exhausted in /api/ai-stream; falling back to next provider');
+      }
+    }
+
+    if (!served && process.env.ANTHROPIC_API_KEY) {
+      totalConfigured += 1;
+      const result = await streamAnthropic(prompt, context, res, '/api/ai-stream');
+      if (result.success) served = true;
+      else if (result.rateLimited) {
+        rateLimitedCount += 1;
+        console.warn('[AI] Anthropic quota exhausted in /api/ai-stream');
+      }
+    }
+
+    if (served) {
+      sendSse(res, { type: 'done' });
+      return res.end();
+    }
+
+    if (totalConfigured > 0 && rateLimitedCount === totalConfigured) {
+      return rateLimitError(res);
+    }
+
+    if (totalConfigured === 0) {
+      return res.status(503).json({ error: 'No AI provider configured' });
+    }
+
+    return res.status(502).json({ error: 'Unable to stream AI response' });
   } catch (err) {
-    console.error('Streaming error:', err);
-    try { res.end(); } catch (e) {}
+    console.error('Streaming error in /api/ai-stream:', err);
+    if (!res.headersSent) return res.status(502).json({ error: err.message || 'AI streaming failed' });
+    sendSse(res, { type: 'error', body: err.message || 'AI streaming failed' });
+    return res.end();
   }
 });
 
-// New AI endpoints (v2) — support Anthropic (preferred if ANTHROPIC_API_KEY set) or OpenAI as fallback.
-app.post('/api/ai-v2', authMiddleware, async (req, res) => {
+// New AI endpoints (v2) — support Anthropic, Gemini, or OpenAI with 429 resilience
+app.post('/api/ai-v2', authMiddleware, aiRateLimit, async (req, res) => {
   try {
     const { prompt, context } = req.body || {};
     if (!prompt) return res.status(400).json({ error: 'Missing prompt' });
     const systemMsg = `You are CampusMate AI, a helpful study assistant aware of the user's tracked subjects, weak topics, and planner.`;
 
+    let reply = '';
+    let rateLimitedCount = 0;
+    let totalConfigured = 0;
+
     // Prefer Anthropic if configured
     if (process.env.ANTHROPIC_API_KEY) {
+      totalConfigured += 1;
       try {
-        const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        const resp = await requestProvider('anthropic', 'https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1354,68 +1730,95 @@ app.post('/api/ai-v2', authMiddleware, async (req, res) => {
             system: systemMsg,
             messages: [{ role: 'user', content: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }],
           }),
-        });
-        if (!resp.ok) {
+        }, '/api/ai-v2');
+
+        if (resp.status === 429) {
+          rateLimitedCount += 1;
+          console.warn('[AI] Anthropic quota exhausted in /api/ai-v2; falling back to next provider');
+        } else if (!resp.ok) {
           const body = await resp.text();
           return res.status(502).json({ error: 'Anthropic API error', status: resp.status, body });
+        } else {
+          const payload = await resp.json();
+          reply = payload?.content?.map((block) => block?.text || '').join('').trim() || '';
+          if (reply) return res.json({ reply });
         }
-        const payload = await resp.json();
-        const reply = payload?.content?.map((block) => block?.text || '').join('').trim() || '';
-        return res.json({ reply });
       } catch (e) {
-        console.error('Anthropic error', e);
-        return res.status(500).json({ error: 'Anthropic request failed' });
+        console.error('Anthropic error in /api/ai-v2:', e);
       }
     }
 
-    if (hasGeminiKey) {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemMsg }] },
-          contents: [{ parts: [{ text: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }] }],
-        }),
-      });
-      if (!response.ok) {
-        const body = await response.text();
-        return res.status(502).json({ error: 'Gemini API error', status: response.status, body });
+    if (!reply && hasGeminiKey) {
+      totalConfigured += 1;
+      try {
+        const response = await requestProvider('gemini', `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemMsg }] },
+            contents: [{ parts: [{ text: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }] }],
+          }),
+        }, '/api/ai-v2');
+
+        if (response.status === 429) {
+          rateLimitedCount += 1;
+          console.warn('[AI] Gemini quota exhausted in /api/ai-v2; falling back to next provider');
+        } else if (!response.ok) {
+          const body = await response.text();
+          return res.status(502).json({ error: 'Gemini API error', status: response.status, body });
+        } else {
+          const payload = await response.json();
+          reply = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
+          if (reply) return res.json({ reply });
+        }
+      } catch (e) {
+        console.error('Gemini error in /api/ai-v2:', e);
       }
-      const payload = await response.json();
-      const reply = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
-      return res.json({ reply });
     }
 
     // Fallback to OpenAI when configured
-    if (hasOpenAIKey) {
+    if (!reply && hasOpenAIKey) {
+      totalConfigured += 1;
       try {
         const messages = [ { role: 'system', content: systemMsg }, { role: 'user', content: `${JSON.stringify(context||{})}\n\nUser: ${prompt}` } ];
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        const response = await requestProvider('openai', 'https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
           body: JSON.stringify({ model: OPENAI_MODEL, messages })
-        });
-        if (!response.ok) {
+        }, '/api/ai-v2');
+
+        if (response.status === 429) {
+          rateLimitedCount += 1;
+          console.warn('[AI] OpenAI quota exhausted in /api/ai-v2');
+        } else if (!response.ok) {
           const body = await response.text();
           return res.status(502).json({ error: 'OpenAI API error', status: response.status, body });
+        } else {
+          const payload = await response.json();
+          reply = payload?.choices?.[0]?.message?.content?.trim() || '';
+          if (reply) return res.json({ reply });
         }
-        const payload = await response.json();
-        const reply = payload?.choices?.[0]?.message?.content?.trim() || '';
-        return res.json({ reply });
       } catch (e) {
-        console.error('OpenAI error', e);
-        return res.status(500).json({ error: 'OpenAI request failed' });
+        console.error('OpenAI error in /api/ai-v2:', e);
       }
     }
 
-    return res.status(500).json({ error: 'No AI provider configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)' });
+    if (totalConfigured > 0 && rateLimitedCount === totalConfigured) {
+      return rateLimitError(res);
+    }
+
+    if (totalConfigured === 0) {
+      return res.status(503).json({ error: 'No AI provider configured (set GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY)' });
+    }
+
+    return res.status(502).json({ error: 'No AI provider returned a reply' });
   } catch (e) {
-    console.error(e);
+    console.error('ai-v2 error:', e);
     return res.status(500).json({ error: 'server error' });
   }
 });
 
-app.post('/api/quiz-explain', authMiddleware, async (req, res) => {
+app.post('/api/quiz-explain', authMiddleware, aiRateLimit, async (req, res) => {
   try {
     const { question, options, correctAnswerIndex, userAnswerIndex } = req.body || {};
     if (
@@ -1442,9 +1845,12 @@ Correct option: ${correctAnswerIndex}: ${correctOption}
 Student option: ${userAnswerIndex}: ${userOption}
 Return only the explanation text.`;
     let explanation = '';
+    let rateLimitedProviders = 0;
+    let totalConfigured = 0;
 
     if (process.env.ANTHROPIC_API_KEY) {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      totalConfigured += 1;
+      const response = await requestProvider('anthropic', 'https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1456,21 +1862,29 @@ Return only the explanation text.`;
           max_tokens: 300,
           messages: [{ role: 'user', content: prompt }],
         }),
-      });
-      if (response.ok) {
+      }, '/api/quiz-explain');
+      if (response.status === 429) {
+        rateLimitedProviders += 1;
+        console.warn('[AI] Anthropic quota exhausted for quiz explanation; trying the next provider');
+      } else if (response.ok) {
         const payload = await response.json();
         explanation = payload?.content?.map((block) => block?.text || '').join('').trim() || '';
       }
     }
 
     if (!explanation && hasGeminiKey) {
+      totalConfigured += 1;
       for (const model of await getGeminiModels()) {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+        const response = await requestProvider('gemini', `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-        });
-        if (response.ok) {
+        }, '/api/quiz-explain');
+        if (response.status === 429) {
+          rateLimitedProviders += 1;
+          console.warn('[AI] Gemini quota exhausted for quiz explanation; trying the next provider');
+          break;
+        } else if (response.ok) {
           const payload = await response.json();
           explanation = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
           if (explanation) break;
@@ -1479,135 +1893,94 @@ Return only the explanation text.`;
     }
 
     if (!explanation && hasOpenAIKey) {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      totalConfigured += 1;
+      const response = await requestProvider('openai', 'https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
         body: JSON.stringify({
           model: OPENAI_MODEL,
           messages: [{ role: 'user', content: prompt }],
         }),
-      });
-      if (response.ok) {
+      }, '/api/quiz-explain');
+      if (response.status === 429) {
+        rateLimitedProviders += 1;
+        console.warn('[AI] OpenAI quota exhausted for quiz explanation');
+      } else if (response.ok) {
         const payload = await response.json();
         explanation = payload?.choices?.[0]?.message?.content?.trim() || '';
       }
     }
 
-    if (!explanation) return res.status(502).json({ error: 'No AI provider returned an explanation' });
-    return res.json({ explanation });
+    if (explanation) return res.json({ explanation });
+
+    if (totalConfigured > 0 && rateLimitedProviders === totalConfigured) {
+      return rateLimitError(res);
+    }
+
+    return res.status(502).json({ error: 'No AI provider returned an explanation' });
   } catch (error) {
     console.error('Quiz explanation failed:', error);
     return res.status(502).json({ error: 'Unable to generate quiz explanation' });
   }
 });
 
-function sendSse(res, payload) {
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
-}
-
-async function streamOpenAI(prompt, context, res) {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      messages: [
-        { role: 'system', content: 'You are CampusMate AI, a helpful study assistant aware of the user context.' },
-        { role: 'user', content: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` },
-      ],
-      stream: true,
-    }),
-  });
-  if (!response.ok) throw new Error(`OpenAI streaming request failed (${response.status}): ${await response.text()}`);
-  let buffer = '';
-  for await (const chunk of response.body) {
-    buffer += chunk.toString('utf8');
-    const events = buffer.split('\n\n');
-    buffer = events.pop() || '';
-    for (const event of events) {
-      const data = event.replace(/^data:\s*/m, '').trim();
-      if (!data || data === '[DONE]') continue;
-      const payload = JSON.parse(data);
-      const text = payload?.choices?.[0]?.delta?.content;
-      if (text) sendSse(res, { type: 'delta', text });
-    }
-  }
-}
-
-async function streamAnthropic(prompt, context, res) {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-5',
-      max_tokens: 500,
-      stream: true,
-      system: 'You are CampusMate AI, a helpful study assistant aware of the user context.',
-      messages: [{ role: 'user', content: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }],
-    }),
-  });
-  if (!response.ok) throw new Error(`Anthropic streaming request failed (${response.status}): ${await response.text()}`);
-  let buffer = '';
-  for await (const chunk of response.body) {
-    buffer += chunk.toString('utf8');
-    const events = buffer.split('\n\n');
-    buffer = events.pop() || '';
-    for (const event of events) {
-      const data = event.split('\n').find((line) => line.startsWith('data:'))?.replace(/^data:\s*/, '');
-      if (!data) continue;
-      const payload = JSON.parse(data);
-      const text = payload?.type === 'content_block_delta' ? payload?.delta?.text : '';
-      if (text) sendSse(res, { type: 'delta', text });
-    }
-  }
-}
-
-async function streamGemini(prompt, context, res) {
-  const model = GEMINI_MODEL;
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(GEMINI_KEY)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: 'You are CampusMate AI, a helpful study assistant aware of the user context.' }] },
-      contents: [{ parts: [{ text: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }] }],
-    }),
-  });
-  if (!response.ok) throw new Error(`Gemini streaming request failed (${response.status}): ${await response.text()}`);
-  let buffer = '';
-  for await (const chunk of response.body) {
-    buffer += chunk.toString('utf8');
-    const events = buffer.split('\n\n');
-    buffer = events.pop() || '';
-    for (const event of events) {
-      const data = event.replace(/^data:\s*/m, '').trim();
-      if (!data) continue;
-      const payload = JSON.parse(data);
-      const text = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '';
-      if (text) sendSse(res, { type: 'delta', text });
-    }
-  }
-}
-
-app.post('/api/ai-stream-v2', authMiddleware, async (req, res) => {
+app.post('/api/ai-stream-v2', authMiddleware, aiRateLimit, async (req, res) => {
   try {
     const { prompt, context } = req.body || {};
     if (!prompt) return res.status(400).json({ error: 'Missing prompt' });
 
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders();
+    let served = false;
+    let rateLimitedCount = 0;
+    let totalConfigured = 0;
 
-    if (hasGeminiKey) await streamGemini(prompt, context, res);
-    else if (process.env.ANTHROPIC_API_KEY) await streamAnthropic(prompt, context, res);
-    else if (hasOpenAIKey) await streamOpenAI(prompt, context, res);
-    else throw new Error('No AI provider configured');
-    sendSse(res, { type: 'done' });
-    return res.end();
+    if (hasGeminiKey) {
+      totalConfigured += 1;
+      const result = await streamGemini(prompt, context, res, '/api/ai-stream-v2');
+      if (result.success) {
+        served = true;
+      } else if (result.rateLimited) {
+        rateLimitedCount += 1;
+        console.warn('[AI] Gemini quota exhausted in /api/ai-stream-v2; falling back to next provider');
+      }
+    }
+
+    if (!served && process.env.ANTHROPIC_API_KEY) {
+      totalConfigured += 1;
+      const result = await streamAnthropic(prompt, context, res, '/api/ai-stream-v2');
+      if (result.success) {
+        served = true;
+      } else if (result.rateLimited) {
+        rateLimitedCount += 1;
+        console.warn('[AI] Anthropic quota exhausted in /api/ai-stream-v2; falling back to next provider');
+      }
+    }
+
+    if (!served && hasOpenAIKey) {
+      totalConfigured += 1;
+      const result = await streamOpenAI(prompt, context, res, '/api/ai-stream-v2');
+      if (result.success) {
+        served = true;
+      } else if (result.rateLimited) {
+        rateLimitedCount += 1;
+        console.warn('[AI] OpenAI quota exhausted in /api/ai-stream-v2');
+      }
+    }
+
+    if (served) {
+      sendSse(res, { type: 'done' });
+      return res.end();
+    }
+
+    if (totalConfigured > 0 && rateLimitedCount === totalConfigured) {
+      console.error('[AI] All configured AI providers are rate-limited for /api/ai-stream-v2');
+      return rateLimitError(res);
+    }
+
+    if (totalConfigured === 0) {
+      return res.status(503).json({ error: 'No AI provider configured' });
+    }
+
+    return res.status(502).json({ error: 'Unable to stream AI response' });
   } catch (e) {
     console.error('Stream v2 error', e);
     if (!res.headersSent) return res.status(502).json({ error: e.message || 'AI streaming failed' });

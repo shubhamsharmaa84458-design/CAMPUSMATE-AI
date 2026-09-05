@@ -1740,7 +1740,6 @@ function Assistant({ data, updateData, user }) {
       const token = localStorage.getItem('campusmate_token');
       const headers = { "Content-Type": "application/json" };
       if (token) headers['Authorization'] = `Bearer ${token}`;
-      if (token) headers['Authorization'] = `Bearer ${token}`;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 300000);
       const resp = await fetch("/api/ai-stream-v2", {
@@ -1753,10 +1752,9 @@ function Assistant({ data, updateData, user }) {
 
       if (!resp.ok || !resp.body) {
         // try non-streaming API as fallback
+        let errorMessage = "The AI service is unavailable. Please check the server AI configuration and try again.";
         try {
-          const token = localStorage.getItem('campusmate_token');
           const h = { 'Content-Type': 'application/json' };
-          if (token) h['Authorization'] = `Bearer ${token}`;
           if (token) h['Authorization'] = `Bearer ${token}`;
           const r2 = await fetch('/api/ai-v2', { method: 'POST', headers: h, body: JSON.stringify({ prompt: clean, context: learningContext }) });
           if (r2.ok) {
@@ -1769,13 +1767,25 @@ function Assistant({ data, updateData, user }) {
             schedulePersist(fallbackChat);
             return;
           }
+          const errData = await r2.json().catch(() => null);
+          if (errData?.error) {
+            errorMessage = errData.error;
+          }
         } catch (e) {
           console.warn('fallback ai call failed', e);
         }
 
-        const fallback = "The AI service is unavailable. Please check the server AI configuration and try again.";
+        if (errorMessage === "The AI service is unavailable. Please check the server AI configuration and try again.") {
+          try {
+            const errData = await resp.json().catch(() => null);
+            if (errData?.error) errorMessage = errData.error;
+          } catch {
+            // ignore
+          }
+        }
+
         const aiId = uid();
-        const aiMessage = { id: aiId, role: "assistant", text: fallback, time: new Date().toISOString() };
+        const aiMessage = { id: aiId, role: "assistant", text: errorMessage, time: new Date().toISOString() };
         const fallbackChat = [...baseChat, aiMessage];
         chatRef.current = fallbackChat;
         updateData({ ...data, chat: fallbackChat });
@@ -1823,7 +1833,7 @@ function Assistant({ data, updateData, user }) {
                   break;
                 } else if (obj.type === 'error') {
                   // Keep the assistant useful when the server-side provider is unavailable.
-                  currentText = `The AI service could not answer: ${obj.body || "provider unavailable"}`;
+                  currentText = obj.body || "The AI service is temporarily unavailable. Please try again.";
                   updateChatMessage(aiId, () => ({ text: currentText }));
                   doneSignal = true;
                   break;
