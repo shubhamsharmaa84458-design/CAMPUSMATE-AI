@@ -185,7 +185,7 @@ ${text.slice(0, 50000)}`;
         id: `pdf-${index + 1}`,
         name: subject.name,
         code: subject.code,
-        topics: splitSyllabusTopics(subject.topics.length ? subject.topics : [subject.name]).slice(0, 20).map((name, topicIndex) => ({
+        topics: splitSyllabusTopics(subject.topics.length ? subject.topics : [subject.name]).slice(0, 200).map((name, topicIndex) => ({
           id: `pdf-topic-${index + 1}-${topicIndex + 1}`,
           name: name.trim(),
           mastery: 0,
@@ -378,7 +378,7 @@ function parseSyllabusText(text) {
         id: `pdf-${subjects.length + 1}`,
         name: normalized,
         code,
-        topics: (topics.length ? topics : [normalized]).slice(0, 20).map((topic, index) => ({
+        topics: (topics.length ? topics : [normalized]).slice(0, 200).map((topic, index) => ({
           id: `pdf-topic-${subjects.length + 1}-${index + 1}`,
           name: topic,
           mastery: 0,

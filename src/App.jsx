@@ -142,13 +142,14 @@ function Button({
   variant = "primary",
   type = "button",
   disabled = false,
+  className = "",
   ...props
 }) {
   return (
     <button
       type={type}
       disabled={disabled}
-      className={`btn btn-${variant}`}
+      className={`btn btn-${variant} ${className}`.trim()}
       onClick={onClick}
       {...props}
     >
@@ -948,10 +949,20 @@ function Subjects({ data, updateData }) {
 
                 <Button
                   variant="secondary"
+                  className="manage-topics-btn"
                   onClick={() => setSelected(subject)}
                 >
                   Manage topics
                 </Button>
+                {data.syllabus?.text && (
+                  <Button
+                    variant="secondary"
+                    className="view-extracted-notes-btn"
+                    onClick={() => setSelected({ ...subject, showExtractedNotes: true })}
+                  >
+                    <Eye size={15} /> View Extracted Notes
+                  </Button>
+                )}
               </Card>
             );
           })}
@@ -1014,6 +1025,7 @@ function Subjects({ data, updateData }) {
 
 function TopicModal({ subject, data, updateData, close }) {
   const [topic, setTopic] = useState("");
+  const [showExtractedNotes, setShowExtractedNotes] = useState(Boolean(subject.showExtractedNotes));
 
   function addTopic(e) {
     e.preventDefault();
@@ -1066,6 +1078,22 @@ function TopicModal({ subject, data, updateData, close }) {
 
   const currentSubject =
     data.subjects.find((s) => s.id === subject.id) || subject;
+
+  if (showExtractedNotes) {
+    return (
+      <Modal title={`${currentSubject.name} extracted notes`} close={close}>
+        <p className="muted small">
+          Raw text extracted from the uploaded syllabus PDF. Use it to verify this subject's topics.
+        </p>
+        <pre className="syllabus-modal-preview">{data.syllabus?.text || "No extracted notes are available."}</pre>
+        <div className="modal-actions">
+          <Button variant="secondary" onClick={() => setShowExtractedNotes(false)}>
+            Back to topics
+          </Button>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <Modal title={`${currentSubject.name} topics`} close={close}>
@@ -2133,7 +2161,6 @@ function Quiz({ data, updateData }) {
     value: note.chapter,
   }));
   const practiceOptions = [...topicOptions, ...noteOptions];
-  const topicPrompt = practiceOptions.map((topic) => topic.value).join("|");
   const selectedTopicValue = practiceOptions.find((topic) => topic.id === selectedTopic)?.value;
 
   function start(nextQuestions = questions) {
@@ -2216,10 +2243,6 @@ function Quiz({ data, updateData }) {
     }
   }
 
-  useEffect(() => {
-    if (topicPrompt && !started) generateAiQuiz();
-  }, [topicPrompt, started]);
-
   function renderTopicSelector() {
     return (
       <label className="quiz-topic-selector">
@@ -2232,7 +2255,6 @@ function Quiz({ data, updateData }) {
             setSelectedTopic(value);
             setStarted(false);
             setFinished(false);
-            generateAiQuiz(value);
           }}
         >
           <option value="all">All topics</option>
