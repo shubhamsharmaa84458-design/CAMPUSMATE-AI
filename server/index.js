@@ -141,7 +141,7 @@ async function extractPdfWithGemini(buffer, kind = 'syllabus') {
   const prompt = kind === 'notes'
     ? 'Extract all readable text from this chapter or study-notes PDF. Preserve headings, numbered lists, formulas when possible, and the original order. Return only the extracted text with no commentary.'
     : 'Read this syllabus PDF. Return all visible subjects and their chapter/unit/topic names using exactly this format, with no commentary: SUBJECT: <subject name> followed by one or more TOPIC: <topic name> lines. Include every subject and topic you can read.';
-  const models = [...new Set([GEMINI_MODEL, 'gemini-2.5-flash', 'gemini-2.0-flash'])];
+  const models = await getGeminiModels();
   for (const model of models) {
     try {
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
@@ -165,6 +165,24 @@ async function extractPdfWithGemini(buffer, kind = 'syllabus') {
     }
   }
   return '';
+}
+
+async function getGeminiModels() {
+  const candidates = [GEMINI_MODEL, 'gemini-2.5-flash', 'gemini-2.0-flash'];
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(GEMINI_KEY)}`);
+    if (response.ok) {
+      const payload = await response.json();
+      const available = (payload.models || [])
+        .filter((model) => model.supportedGenerationMethods?.includes('generateContent'))
+        .map((model) => model.name?.replace(/^models\//, ''))
+        .filter(Boolean);
+      candidates.push(...available.filter((model) => /flash|pro/i.test(model)));
+    }
+  } catch (error) {
+    console.error('Unable to discover Gemini models:', error);
+  }
+  return [...new Set(candidates)];
 }
 
 async function extractPdfWithOpenAI(buffer, kind = 'syllabus') {

@@ -142,6 +142,7 @@ function Button({
   variant = "primary",
   type = "button",
   disabled = false,
+  ...props
 }) {
   return (
     <button
@@ -149,6 +150,7 @@ function Button({
       disabled={disabled}
       className={`btn btn-${variant}`}
       onClick={onClick}
+      {...props}
     >
       {children}
     </button>
@@ -577,17 +579,17 @@ function Dashboard({ user, data, setView, updateData }) {
           title="Upload your syllabus"
           action={syllabus && <span className="small muted">Last file: {syllabus.name}</span>}
         />
-        <p className="muted small">Upload a text-based PDF to automatically create subjects and starter topics.</p>
+        <p className="muted small">Upload a text or scanned-image PDF to automatically create subjects and starter topics.</p>
         <label className="upload-button btn btn-secondary">
           <FileText size={16} /> {uploading ? "Reading PDF…" : "Choose syllabus PDF"}
           <input type="file" accept="application/pdf,.pdf" onChange={uploadSyllabus} hidden disabled={uploading} />
         </label>
         {syllabus && (
           <div className="syllabus-actions">
-            <Button variant="secondary" onClick={() => setShowSyllabus(true)}>
+            <Button variant="secondary" onClick={() => setShowSyllabus(true)} aria-label="View extracted syllabus">
               <Eye size={16} /> View extracted syllabus
             </Button>
-            <Button variant="danger" onClick={deleteSyllabus} disabled={deletingSyllabus}>
+            <Button variant="danger" onClick={deleteSyllabus} disabled={deletingSyllabus} aria-label="Delete extracted syllabus">
               <Trash2 size={16} /> {deletingSyllabus ? "Deleting…" : "Delete extracted syllabus"}
             </Button>
           </div>
