@@ -12,6 +12,7 @@ import { fileURLToPath } from "url";
 import multer from "multer";
 import { PDFParse } from "pdf-parse";
 import { inflateSync } from "zlib";
+import { createHash } from "crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -62,6 +63,32 @@ function loadAllMessages() { try { return JSON.parse(fs.readFileSync(MESSAGES_FI
 function saveAllMessages(obj) { fs.writeFileSync(MESSAGES_FILE, JSON.stringify(obj, null, 2), 'utf8'); }
 function loadQuizHistory() { try { return JSON.parse(fs.readFileSync(QUIZ_HISTORY_FILE, 'utf8') || '{}'); } catch { return {}; } }
 function saveQuizHistory(history) { fs.writeFileSync(QUIZ_HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8'); }
+
+function quizCacheKey(topics, materials) {
+  return createHash('sha256')
+    .update(JSON.stringify({
+      topics: [...new Set(topics)].map((topic) => String(topic).trim().toLowerCase()).sort(),
+      materials: materials.map((material) => ({
+        topic: material.topic,
+        text: String(material.text || '').slice(0, 12000),
+      })),
+    }))
+    .digest('hex');
+}
+
+async function loadCachedQuizQuestions(cacheKey) {
+  if (!useDb || !dbClient) return [];
+  const result = await dbClient.query('SELECT questions FROM quiz_questions WHERE cache_key = $1', [cacheKey]);
+  return Array.isArray(result.rows[0]?.questions) ? result.rows[0].questions : [];
+}
+
+async function saveCachedQuizQuestions(cacheKey, questions) {
+  if (!useDb || !dbClient || !questions.length) return;
+  await dbClient.query(
+    'INSERT INTO quiz_questions(cache_key, questions, updated_at) VALUES($1, $2, NOW()) ON CONFLICT (cache_key) DO UPDATE SET questions = $2, updated_at = NOW()',
+    [cacheKey, JSON.stringify(questions)]
+  );
+}
 
 async function loadQuizHistoryForEmail(email) {
   const key = (email || '').trim().toLowerCase();
@@ -478,6 +505,13 @@ async function initDb() {
       updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
+  await dbClient.query(`
+    CREATE TABLE IF NOT EXISTS quiz_questions (
+      cache_key TEXT PRIMARY KEY,
+      questions JSONB NOT NULL DEFAULT '[]',
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
   console.log('Connected to DATABASE');
 }
 initDb().catch(e => { console.warn('DB init failed (continuing with file-based storage):', e.message || e); });
@@ -723,28 +757,42 @@ app.post('/api/quiz-generate', authMiddleware, async (req, res) => {
   const count = Math.max(1, Math.min(10, Number(req.body?.count) || 5));
   const email = req.user?.email || 'anonymous';
   const used = new Set(await loadQuizHistoryForEmail(email));
+  const cacheKey = quizCacheKey(pool, materials);
+  const cached = (await loadCachedQuizQuestions(cacheKey))
+    .filter((question) => question && typeof question.question === 'string' && !used.has(question.question));
+  if (cached.length >= count) {
+    const questions = cached.slice(0, count).map((question, index) => ({
+      ...question,
+      id: `cached-${Date.now()}-${index}`,
+    }));
+    await saveQuizHistoryForEmail(email, [...used, ...questions.map((question) => question.question)]);
+    return res.json({ questions, cached: true });
+  }
 
   const materialText = materials
     .map((material) => `${material.topic}: ${String(material.text || '').slice(0, 12000)}`)
     .join('\n\n');
-  const quizPrompt = `Create ${count} important, distinct multiple-choice questions for a student practicing these topics: ${pool.join(', ')}.
+  const quizPrompt = `Create exactly ${count} important, distinct multiple-choice questions ONLY about these selected topics: ${pool.join(', ')}.
 Return ONLY valid JSON in this exact shape: {"questions":[{"topic":"topic name","question":"...","options":["...","...","...","..."],"answer":0}]}.
-The answer must be the zero-based index of the correct option. Use the supplied chapter notes when available and test important concepts, definitions, applications, and likely exam points. Avoid these previously used question texts: ${JSON.stringify([...used].slice(-30))}
+The answer must be the zero-based index of the correct option. Make every question materially different, cover different concepts, and never repeat or paraphrase these previous questions: ${JSON.stringify([...used].slice(-30))}
 
 Chapter notes:
 ${materialText || 'No chapter notes supplied.'}`;
   try {
     let payload;
     if (hasGeminiKey) {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: [{ text: quizPrompt }] }] }),
-      });
-      if (response.ok) {
-        const body = await response.json();
-        const text = body?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
-        payload = JSON.parse(text.replace(/^```json\s*|\s*```$/g, ''));
+      for (const model of await getGeminiModels()) {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: quizPrompt }] }] }),
+        });
+        if (response.ok) {
+          const body = await response.json();
+          const text = body?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
+          payload = JSON.parse(text.replace(/^```json\s*|\s*```$/g, ''));
+          if (payload?.questions) break;
+        }
       }
     } else if (process.env.ANTHROPIC_API_KEY) {
       const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -761,23 +809,44 @@ ${materialText || 'No chapter notes supplied.'}`;
         const text = body?.content?.map((block) => block?.text || '').join('').trim() || '';
         payload = JSON.parse(text.replace(/^```json\s*|\s*```$/g, ''));
       }
+    } else if (hasOpenAIKey) {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
+        body: JSON.stringify({
+          model: OPENAI_MODEL,
+          messages: [{ role: 'user', content: quizPrompt }],
+          response_format: { type: 'json_object' },
+        }),
+      });
+      if (response.ok) {
+        const body = await response.json();
+        payload = JSON.parse(body?.choices?.[0]?.message?.content || '{}');
+      }
     }
     const aiQuestions = payload?.questions;
     if (Array.isArray(aiQuestions) && aiQuestions.length) {
-      const questions = aiQuestions.slice(0, count).filter((question) =>
+      const questionTexts = new Set();
+      const questions = aiQuestions.filter((question) =>
         question && typeof question.question === 'string' && Array.isArray(question.options)
         && question.options.length === 4 && Number.isInteger(question.answer)
         && question.answer >= 0 && question.answer < 4
       ).map((question, index) => ({
         id: `generated-${Date.now()}-${index}`,
-        topic: question.topic || pool[index % pool.length],
+        topic: pool.find((topic) => String(question.topic || '').toLowerCase().includes(String(topic).toLowerCase())) || pool[index % pool.length],
         question: question.question.trim(),
         options: question.options.map((option) => String(option)),
         answer: question.answer,
-      }));
-      if (questions.length) {
-        await saveQuizHistoryForEmail(email, [...new Set([...used, ...questions.map((question) => question.question)])]);
-        return res.json({ questions });
+      })).filter((question) => {
+        const key = question.question.toLowerCase().replace(/\s+/g, ' ').trim();
+        if (!key || used.has(question.question) || questionTexts.has(key)) return false;
+        questionTexts.add(key);
+        return true;
+      }).slice(0, count);
+      if (questions.length >= count) {
+        await saveCachedQuizQuestions(cacheKey, questions.map(({ id: _id, ...question }) => question));
+        await saveQuizHistoryForEmail(email, [...used, ...questions.map((question) => question.question)]);
+        return res.json({ questions, cached: false });
       }
     }
   } catch (error) {
@@ -844,8 +913,10 @@ ${materialText || 'No chapter notes supplied.'}`;
     (topic) => ({ question: `Which statement best describes ${topic}?`, options: [`It is a core concept in ${topic}`, 'It is unrelated to computing', 'It is only a hardware component', 'It cannot be tested'], answer: 0 }),
     (topic) => ({ question: `What is a useful way to study ${topic}?`, options: ['Practice and explain examples', 'Avoid practicing', 'Memorize without understanding', 'Skip all examples'], answer: 0 }),
     (topic) => ({ question: `Which approach helps build confidence in ${topic}?`, options: ['Apply it to a small problem', 'Ignore feedback', 'Only read the title', 'Avoid revising it'], answer: 0 }),
+    (topic) => ({ question: `Which activity best checks understanding of ${topic}?`, options: ['Explain it with an example', 'Read only the heading', 'Skip difficult parts', 'Avoid questions'], answer: 0 }),
+    (topic) => ({ question: `What should a learner do after making an error in ${topic}?`, options: ['Review the reasoning and try again', 'Ignore the error', 'Delete the notes', 'Stop practicing'], answer: 0 }),
   ];
-  const questions = Array.from({ length: count }, (_, index) => {
+  const fallbackQuestions = Array.from({ length: count * 3 }, (_, index) => {
     const topic = shuffledPool[index % shuffledPool.length];
     const matchingTemplates = questionTemplates.filter(({ matches }) =>
       matches.some((match) => topic.toLowerCase().includes(match))
@@ -858,15 +929,26 @@ ${materialText || 'No chapter notes supplied.'}`;
     const template = templates[Math.floor(Math.random() * templates.length)]
       || availableGeneric[Math.floor(Math.random() * availableGeneric.length)]
       || genericTemplates[index % genericTemplates.length](topic);
-    used.add(template.question);
-    return {
+    const question = {
       id: `generated-${Date.now()}-${index}`,
       topic,
       question: template.question,
       options: template.options,
       answer: template.answer,
     };
+    return question;
   });
+  const uniqueQuestions = [];
+  const fallbackSeen = new Set(used);
+  for (const question of fallbackQuestions) {
+    if (fallbackSeen.has(question.question)) continue;
+    fallbackSeen.add(question.question);
+    uniqueQuestions.push(question);
+    if (uniqueQuestions.length === count) break;
+  }
+  const questions = uniqueQuestions;
+  if (questions.length < count) return res.status(502).json({ error: 'Unable to generate enough unique questions for this topic. Please try again.' });
+  await saveCachedQuizQuestions(cacheKey, questions.map(({ id: _id, ...question }) => question));
   await saveQuizHistoryForEmail(email, [...new Set([...used, ...questions.map((question) => question.question)])]);
   return res.json({ questions });
 });

@@ -2153,7 +2153,10 @@ function Quiz({ data, updateData }) {
         .map((note) => ({ topic: note.chapter, text: note.text }));
       const response = await fetch("/api/quiz-generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("campusmate_token") || ""}`,
+        },
         body: JSON.stringify({
           topics,
           materials,
