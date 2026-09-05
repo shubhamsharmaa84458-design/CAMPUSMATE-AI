@@ -511,31 +511,32 @@ function Dashboard({ user, data, setView, updateData }) {
       setUploading(false);
     }
 
-    async function deleteSyllabus() {
-      if (!syllabus || !window.confirm("Delete the extracted syllabus and all subjects and topics created from it?")) return;
-      setDeletingSyllabus(true);
-      setSyllabusError("");
-      try {
-        const extractedSubjectIds = new Set(
-          syllabus.subjectIds?.length
-            ? syllabus.subjectIds
-            : data.subjects.map((subject) => subject.id)
-        );
-        const subjects = data.subjects.filter((subject) => !extractedSubjectIds.has(subject.id));
-        const response = await fetch("/api/me/subjects", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ subjects }),
-        });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.error || "Unable to delete extracted syllabus");
-        updateData({ ...data, syllabus: null, subjects });
-        setShowSyllabus(false);
-      } catch (error) {
-        setSyllabusError(error.message || "Unable to delete extracted syllabus");
-      } finally {
-        setDeletingSyllabus(false);
-      }
+  }
+
+  async function deleteSyllabus() {
+    if (!syllabus || !window.confirm("Delete the extracted syllabus and all subjects and topics created from it?")) return;
+    setDeletingSyllabus(true);
+    setSyllabusError("");
+    try {
+      const extractedSubjectIds = new Set(
+        syllabus.subjectIds?.length
+          ? syllabus.subjectIds
+          : data.subjects.map((subject) => subject.id)
+      );
+      const subjects = data.subjects.filter((subject) => !extractedSubjectIds.has(subject.id));
+      const response = await fetch("/api/me/subjects", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subjects }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || "Unable to delete extracted syllabus");
+      updateData({ ...data, syllabus: null, subjects });
+      setShowSyllabus(false);
+    } catch (error) {
+      setSyllabusError(error.message || "Unable to delete extracted syllabus");
+    } finally {
+      setDeletingSyllabus(false);
     }
   }
 
