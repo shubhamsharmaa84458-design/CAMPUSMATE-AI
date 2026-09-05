@@ -954,15 +954,6 @@ function Subjects({ data, updateData }) {
                 >
                   Manage topics
                 </Button>
-                {data.syllabus?.text && (
-                  <Button
-                    variant="secondary"
-                    className="view-extracted-notes-btn"
-                    onClick={() => setSelected({ ...subject, showExtractedNotes: true })}
-                  >
-                    <Eye size={15} /> View Extracted Notes
-                  </Button>
-                )}
               </Card>
             );
           })}
@@ -1025,7 +1016,6 @@ function Subjects({ data, updateData }) {
 
 function TopicModal({ subject, data, updateData, close }) {
   const [topic, setTopic] = useState("");
-  const [showExtractedNotes, setShowExtractedNotes] = useState(Boolean(subject.showExtractedNotes));
 
   function addTopic(e) {
     e.preventDefault();
@@ -1078,22 +1068,6 @@ function TopicModal({ subject, data, updateData, close }) {
 
   const currentSubject =
     data.subjects.find((s) => s.id === subject.id) || subject;
-
-  if (showExtractedNotes) {
-    return (
-      <Modal title={`${currentSubject.name} extracted notes`} close={close}>
-        <p className="muted small">
-          Raw text extracted from the uploaded syllabus PDF. Use it to verify this subject's topics.
-        </p>
-        <pre className="syllabus-modal-preview">{data.syllabus?.text || "No extracted notes are available."}</pre>
-        <div className="modal-actions">
-          <Button variant="secondary" onClick={() => setShowExtractedNotes(false)}>
-            Back to topics
-          </Button>
-        </div>
-      </Modal>
-    );
-  }
 
   return (
     <Modal title={`${currentSubject.name} topics`} close={close}>
@@ -1965,6 +1939,7 @@ function Notes({ data, updateData }) {
   const [chapter, setChapter] = useState("");
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
+  const [showExtractedSyllabus, setShowExtractedSyllabus] = useState(false);
   const notes = data.notes || [];
 
   async function uploadNote(event) {
@@ -2029,6 +2004,15 @@ function Notes({ data, updateData }) {
           <h1>Chapter Notes</h1>
           <p>Upload chapter PDFs so AI Quiz can create questions from your study material.</p>
         </div>
+        {data.syllabus?.text && (
+          <Button
+            variant="secondary"
+            className="view-extracted-notes-btn"
+            onClick={() => setShowExtractedSyllabus(true)}
+          >
+            <Eye size={15} /> View Extracted Notes
+          </Button>
+        )}
       </div>
       <Card>
         <label htmlFor="note-chapter">Chapter name</label>
@@ -2052,6 +2036,14 @@ function Notes({ data, updateData }) {
           </Card>
         ))}
       </div>
+      {showExtractedSyllabus && data.syllabus?.text && (
+        <Modal
+          title={data.syllabus.name || "Extracted syllabus notes"}
+          close={() => setShowExtractedSyllabus(false)}
+        >
+          <pre className="syllabus-modal-preview">{data.syllabus.text}</pre>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -2344,7 +2336,7 @@ function Quiz({ data, updateData }) {
 
           <div className="quiz-actions">
             <Button onClick={() => start(quizQuestions.slice(0, 5))}>Start practice quiz</Button>
-            <Button variant="secondary" disabled={generating} onClick={() => generateAiQuiz(selectedTopic)}>
+            <Button variant="secondary" className="generate-ai-quiz-btn" disabled={generating} onClick={() => generateAiQuiz(selectedTopic)}>
               <Sparkles size={16} /> {generating ? "Generating…" : "Generate AI quiz"}
             </Button>
           </div>
