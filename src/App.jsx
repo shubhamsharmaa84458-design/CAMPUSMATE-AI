@@ -1116,7 +1116,14 @@ function Attendance({ data, updateData }) {
   const today = new Date();
   const [month, setMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [subjectId, setSubjectId] = useState(data.subjects[0]?.id || "");
+  const [subjectQuery, setSubjectQuery] = useState("");
   const records = (data.attendance || {})[subjectId] || {};
+  const filteredSubjects = data.subjects.filter((subject) =>
+    `${subject.name} ${subject.code || ""}`.toLowerCase().includes(subjectQuery.trim().toLowerCase())
+  );
+  const visibleSubjects = filteredSubjects.some((subject) => subject.id === subjectId)
+    ? filteredSubjects
+    : data.subjects.filter((subject) => subject.id === subjectId);
   const year = month.getFullYear();
   const monthIndex = month.getMonth();
   const firstDay = new Date(year, monthIndex, 1).getDay();
@@ -1136,8 +1143,20 @@ function Attendance({ data, updateData }) {
   return (
     <div className="page">
       <div className="page-header"><div><h1>Attendance Tracker</h1><p>Mark daily attendance and track your subject-wise percentage.</p></div>
-        <select className="attendance-subject" value={subjectId} onChange={(event) => setSubjectId(event.target.value)}>{data.subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.name}</option>)}</select>
+        <div className="attendance-subject-controls">
+          <input
+            className="attendance-search"
+            value={subjectQuery}
+            onChange={(event) => setSubjectQuery(event.target.value)}
+            placeholder="Search subjects or course codes"
+            aria-label="Search attendance subjects"
+          />
+          <select className="attendance-subject" value={subjectId} onChange={(event) => setSubjectId(event.target.value)}>
+            {visibleSubjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.name}{subject.code ? ` (${subject.code})` : ""}</option>)}
+          </select>
+        </div>
       </div>
+      {data.subjects.length > 0 && filteredSubjects.length === 0 && <p className="attendance-no-results">No subjects match “{subjectQuery}”. Clear the search to see all subjects.</p>}
       <div className="attendance-summary"><div><span>Attendance</span><strong>{percentage}%</strong></div><div><span>Present</span><strong>{present}</strong></div><div><span>Absent</span><strong>{absent}</strong></div></div>
       <Card><div className="attendance-month"><button className="icon-btn" onClick={() => setMonth(new Date(year, monthIndex - 1, 1))} aria-label="Previous month">‹</button><h2>{month.toLocaleString("default", { month: "long", year: "numeric" })}</h2><button className="icon-btn" onClick={() => setMonth(new Date(year, monthIndex + 1, 1))} aria-label="Next month">›</button></div>
         <div className="attendance-weekdays">{["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => <span key={day}>{day}</span>)}</div>
