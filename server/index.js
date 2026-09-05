@@ -304,6 +304,18 @@ async function createUserRecord(email, name, course, subjects, passwordHash) {
     await dbClient.query('INSERT INTO users(email, name, course, subjects, password_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT (email) DO NOTHING', [key, name, course, JSON.stringify(subjects), passwordHash]);
     return { email: key, name, course, subjects };
   }
+
+  async function updateUserSubjects(email, subjects) {
+    const key = (email || '').trim().toLowerCase();
+    if (useDb && dbClient) {
+      await dbClient.query('UPDATE users SET subjects = $1 WHERE email = $2', [JSON.stringify(subjects), key]);
+      return;
+    }
+    const users = loadAllUsers();
+    if (!users[key]) return;
+    users[key].subjects = subjects;
+    saveAllUsers(users);
+  }
   const users = loadAllUsers();
   users[key] = { email: key, name, course, subjects, passwordHash };
   saveAllUsers(users);
@@ -431,8 +443,23 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-app.get('/api/me', authMiddleware, (req, res) => {
-  return res.json({ user: req.user });
+app.get('/api/me', authMiddleware, async (req, res) => {
+  const user = await getUserByEmail(req.user?.email);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  return res.json({ user: { email: user.email, name: user.name, course: user.course || '', subjects: user.subjects || [] } });
+});
+
+app.patch('/api/me/subjects', authMiddleware, async (req, res) => {
+  try {
+    const subjects = req.body?.subjects;
+    if (!Array.isArray(subjects)) return res.status(400).json({ error: 'Subjects must be an array' });
+    if (!req.user?.email) return res.status(400).json({ error: 'Missing email in token' });
+    await updateUserSubjects(req.user.email, subjects);
+    return res.json({ ok: true, subjects });
+  } catch (error) {
+    console.error('Subject update failed:', error);
+    return res.status(500).json({ error: 'Unable to update subjects' });
+  }
 });
 
 app.post('/api/pdf-extract', authMiddleware, upload.single('pdf'), async (req, res) => {

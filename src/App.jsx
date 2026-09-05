@@ -8,6 +8,7 @@ import {
   BarChart3,
   Compass,
   FileText,
+  Eye,
   LogOut,
   Plus,
   X,
@@ -433,6 +434,8 @@ function Sidebar({ view, setView, user, logout }) {
 
 function Dashboard({ user, data, setView, updateData }) {
   const [uploading, setUploading] = useState(false);
+  const [deletingSyllabus, setDeletingSyllabus] = useState(false);
+  const [showSyllabus, setShowSyllabus] = useState(false);
   const [syllabusError, setSyllabusError] = useState("");
   const syllabus = data.syllabus;
   const topicCount = data.subjects.reduce(
@@ -481,15 +484,58 @@ function Dashboard({ user, data, setView, updateData }) {
       const response = await fetch("/api/pdf-extract", { method: "POST", body: form });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Unable to read syllabus");
+      const subjects = payload.subjects?.length ? payload.subjects : data.subjects;
+      const nextSyllabus = {
+        name: payload.name,
+        text: payload.text,
+        uploadedAt: new Date().toISOString(),
+        subjectIds: payload.subjects?.length ? subjects.map((subject) => subject.id) : [],
+      };
+      const saveResponse = await fetch("/api/me/subjects", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subjects }),
+      });
+      if (!saveResponse.ok) {
+        const savePayload = await saveResponse.json().catch(() => ({}));
+        throw new Error(savePayload.error || "Unable to save extracted subjects");
+      }
       updateData({
         ...data,
-        syllabus: { name: payload.name, text: payload.text, uploadedAt: new Date().toISOString() },
-        subjects: payload.subjects?.length ? payload.subjects : data.subjects,
+        syllabus: nextSyllabus,
+        subjects,
       });
     } catch (error) {
       setSyllabusError(error.message || "Unable to read syllabus");
     } finally {
       setUploading(false);
+    }
+
+    async function deleteSyllabus() {
+      if (!syllabus || !window.confirm("Delete the extracted syllabus and all subjects and topics created from it?")) return;
+      setDeletingSyllabus(true);
+      setSyllabusError("");
+      try {
+        const extractedSubjectIds = new Set(
+          syllabus.subjectIds?.length
+            ? syllabus.subjectIds
+            : data.subjects.map((subject) => subject.id)
+        );
+        const subjects = data.subjects.filter((subject) => !extractedSubjectIds.has(subject.id));
+        const response = await fetch("/api/me/subjects", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ subjects }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "Unable to delete extracted syllabus");
+        updateData({ ...data, syllabus: null, subjects });
+        setShowSyllabus(false);
+      } catch (error) {
+        setSyllabusError(error.message || "Unable to delete extracted syllabus");
+      } finally {
+        setDeletingSyllabus(false);
+      }
     }
   }
 
@@ -520,13 +566,22 @@ function Dashboard({ user, data, setView, updateData }) {
           <input type="file" accept="application/pdf,.pdf" onChange={uploadSyllabus} hidden disabled={uploading} />
         </label>
         {syllabus && (
-          <details className="syllabus-preview">
-            <summary>View extracted syllabus</summary>
-            <pre>{syllabus.text || "No text was found."}</pre>
-          </details>
+          <div className="syllabus-actions">
+            <Button variant="secondary" onClick={() => setShowSyllabus(true)}>
+              <Eye size={16} /> View extracted syllabus
+            </Button>
+            <Button variant="danger" onClick={deleteSyllabus} disabled={deletingSyllabus}>
+              <Trash2 size={16} /> {deletingSyllabus ? "Deleting…" : "Delete extracted syllabus"}
+            </Button>
+          </div>
         )}
         {syllabusError && <div className="error">{syllabusError}</div>}
       </Card>
+      {showSyllabus && syllabus && (
+        <Modal title={syllabus.name || "Extracted syllabus"} close={() => setShowSyllabus(false)}>
+          <pre className="syllabus-modal-preview">{syllabus.text || "No text was found."}</pre>
+        </Modal>
+      )}
 
       <div className="stats-grid">
         <StatCard
