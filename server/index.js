@@ -81,7 +81,9 @@ async function extractPdfText(buffer, kind = 'syllabus') {
   const rawText = extractRawPdfText(buffer);
   if (isUsablePdfText(rawText)) return rawText;
   const aiText = await extractPdfWithGemini(buffer, kind);
-  return isUsablePdfText(aiText) ? aiText : '';
+  if (isUsablePdfText(aiText)) return aiText;
+  const openAiText = await extractPdfWithOpenAI(buffer, kind);
+  return isUsablePdfText(openAiText) ? openAiText : '';
 }
 
 function isUsablePdfText(text) {
@@ -159,6 +161,45 @@ async function extractPdfWithGemini(buffer, kind = 'syllabus') {
     }
   }
   return '';
+}
+
+async function extractPdfWithOpenAI(buffer, kind = 'syllabus') {
+  if (!hasOpenAIKey) return '';
+  const prompt = kind === 'notes'
+    ? 'Read this scanned chapter or study-notes PDF and transcribe all visible text in order. Preserve headings, lists, tables, and formulas where possible. Return only the extracted text.'
+    : 'Read this scanned syllabus PDF and extract every visible subject and chapter, unit, or topic. Return only this format with no commentary: SUBJECT: <subject name> followed by TOPIC: <topic name> lines.';
+  try {
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        input: [{
+          role: 'user',
+          content: [
+            { type: 'input_text', text: prompt },
+            { type: 'input_file', filename: 'document.pdf', file_data: `data:application/pdf;base64,${Buffer.from(buffer).toString('base64')}` },
+          ],
+        }],
+      }),
+    });
+    if (!response.ok) {
+      console.error('OpenAI PDF extraction failed:', response.status, await response.text());
+      return '';
+    }
+    const payload = await response.json();
+    return payload?.output
+      ?.flatMap((item) => item.content || [])
+      ?.map((item) => item.text || '')
+      ?.join('\n')
+      ?.trim() || '';
+  } catch (error) {
+    console.error('OpenAI PDF extraction failed:', error);
+    return '';
+  }
 }
 
 function parseSyllabusText(text) {
