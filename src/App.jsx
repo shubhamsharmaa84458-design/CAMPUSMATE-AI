@@ -137,21 +137,29 @@ async function readApiResponse(response, fallbackMessage) {
   return payload;
 }
 
-function formatExtractedNotes(text) {
-  return String(text || "")
+function isExtractedHeading(line) {
+  return /^(?:#{1,6}\s+|(?:unit|chapter|module|topic|section|subject)\s*[:.-]?\s+|\d+(?:\.\d+)*[.)]?\s+|[A-Z][A-Z0-9\s&-]{3,})/i.test(line);
+}
+
+function ExtractedText({ text }) {
+  const lines = String(text || "")
     .replace(/\r\n?/g, "\n")
     .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .reduce((formatted, line) => {
-      const isHeading = /^(?:#{1,6}\s+|(?:unit|chapter|module|topic|section|subject)\s*[:.-]?\s+|\d+(?:\.\d+)*[.)]?\s+|[A-Z][A-Z0-9\s&-]{3,})/i.test(line);
-      if (isHeading && formatted.length && formatted[formatted.length - 1] !== "") formatted.push("");
-      formatted.push(line);
-      if (isHeading) formatted.push("");
-      return formatted;
-    }, [])
-    .join("\n")
-    .trim();
+    .map((line) => line.trim());
+
+  if (!lines.some(Boolean)) return "No text was found.";
+
+  return lines.map((line, index) => {
+    if (!line) return <div className="extracted-text-spacer" key={`spacer-${index}`} />;
+    return (
+      <div
+        className={isExtractedHeading(line) ? "extracted-text-heading" : "extracted-text-line"}
+        key={`line-${index}`}
+      >
+        {line.replace(/^#{1,6}\s+/, "")}
+      </div>
+    );
+  });
 }
 
 function Button({
@@ -617,7 +625,9 @@ function Dashboard({ user, data, setView, updateData }) {
       </Card>
       {showSyllabus && syllabus && (
         <Modal title={syllabus.name || "Extracted syllabus"} close={() => setShowSyllabus(false)}>
-          <pre className="syllabus-modal-preview">{syllabus.text || "No text was found."}</pre>
+          <div className="syllabus-modal-preview">
+            <ExtractedText text={syllabus.text} />
+          </div>
         </Modal>
       )}
 
@@ -2057,7 +2067,9 @@ function Notes({ data, updateData }) {
           close={() => setSelectedNote(null)}
         >
           <p className="small muted">{selectedNote.name}</p>
-          <pre className="syllabus-modal-preview">{formatExtractedNotes(selectedNote.text) || "No text was found."}</pre>
+          <div className="syllabus-modal-preview">
+            <ExtractedText text={selectedNote.text} />
+          </div>
         </Modal>
       )}
     </div>
