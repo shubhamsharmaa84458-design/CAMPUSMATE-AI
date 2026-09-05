@@ -481,6 +481,7 @@ function Dashboard({ user, data, setView, updateData }) {
     try {
       const form = new FormData();
       form.append("pdf", file);
+      form.append("kind", "syllabus");
       const response = await fetch("/api/pdf-extract", { method: "POST", body: form });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Unable to read syllabus");
@@ -1933,6 +1934,7 @@ function Notes({ data, updateData }) {
     try {
       const form = new FormData();
       form.append("pdf", file);
+      form.append("kind", "notes");
       const response = await fetch("/api/pdf-extract", { method: "POST", body: form });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Unable to read notes");

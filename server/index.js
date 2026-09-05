@@ -68,7 +68,7 @@ async function parseSyllabus(buffer) {
   return parseSyllabusText(result);
 }
 
-async function extractPdfText(buffer) {
+async function extractPdfText(buffer, kind = 'syllabus') {
   const parser = new PDFParse({ data: buffer });
   try {
     const extracted = (await parser.getText())?.text || '';
@@ -80,7 +80,7 @@ async function extractPdfText(buffer) {
   }
   const rawText = extractRawPdfText(buffer);
   if (isUsablePdfText(rawText)) return rawText;
-  const aiText = await extractPdfWithGemini(buffer);
+  const aiText = await extractPdfWithGemini(buffer, kind);
   return isUsablePdfText(aiText) ? aiText : '';
 }
 
@@ -130,28 +130,35 @@ function extractRawPdfText(buffer) {
   return [...new Set(strings)].join('\n');
 }
 
-async function extractPdfWithGemini(buffer) {
+async function extractPdfWithGemini(buffer, kind = 'syllabus') {
   if (!hasGeminiKey) return '';
-  try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+  const prompt = kind === 'notes'
+    ? 'Extract all readable text from this chapter or study-notes PDF. Preserve headings, numbered lists, formulas when possible, and the original order. Return only the extracted text with no commentary.'
+    : 'Read this syllabus PDF. Return all visible subjects and their chapter/unit/topic names using exactly this format, with no commentary: SUBJECT: <subject name> followed by one or more TOPIC: <topic name> lines. Include every subject and topic you can read.';
+  const models = [...new Set([GEMINI_MODEL, 'gemini-2.5-flash', 'gemini-2.0-flash'])];
+  for (const model of models) {
+    try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [
-            { text: 'Read this syllabus PDF. Return all visible subjects and their chapter/unit/topic names using exactly this format, with no commentary: SUBJECT: <subject name> followed by one or more TOPIC: <topic name> lines. Include every subject and topic you can read.' },
+            { text: prompt },
             { inlineData: { mimeType: 'application/pdf', data: Buffer.from(buffer).toString('base64') } },
           ],
         }],
       }),
     });
-    if (!response.ok) return '';
+    if (!response.ok) continue;
     const payload = await response.json();
-    return payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('\n').trim() || '';
-  } catch (error) {
-    console.error('Gemini PDF extraction failed:', error);
-    return '';
+    const text = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('\n').trim() || '';
+    if (isUsablePdfText(text)) return text;
+    } catch (error) {
+      console.error(`Gemini PDF extraction failed with ${model}:`, error);
+    }
   }
+  return '';
 }
 
 function parseSyllabusText(text) {
@@ -487,7 +494,8 @@ app.patch('/api/me/study-data', authMiddleware, async (req, res) => {
 app.post('/api/pdf-extract', authMiddleware, upload.single('pdf'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'A PDF file is required' });
-    const text = await extractPdfText(req.file.buffer);
+    const kind = req.body?.kind === 'notes' ? 'notes' : 'syllabus';
+    const text = await extractPdfText(req.file.buffer, kind);
     if (!text) return res.status(422).json({ error: 'No readable text was found. Please use a text-based PDF or configure GEMINI_API_KEY for scanned PDFs.' });
     return res.json({
       name: req.file.originalname,
