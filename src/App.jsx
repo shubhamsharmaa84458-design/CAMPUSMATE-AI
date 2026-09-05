@@ -162,6 +162,27 @@ function ExtractedText({ text }) {
   });
 }
 
+function isReadingHeading(line) {
+  return /^(?:#{1,6}\s+|(?:unit|chapter|module|topic|section|subject)\s*[:.-]?\s+|\d+(?:\.\d+)*[.)]?\s+|[A-Z][A-Z0-9\s&-]{3,})/i.test(line.trim());
+}
+
+function ReadingText({ text, className = "", trailing }) {
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+  return (
+    <div className={`reading-text ${className}`.trim()}>
+      {lines.map((line, index) => {
+        const trimmed = line.trim();
+        return trimmed ? (
+          <div className={isReadingHeading(trimmed) ? "reading-heading" : "reading-line"} key={`${index}-${trimmed}`}>
+            {trimmed}
+            {trailing && index === lines.length - 1 ? trailing : null}
+          </div>
+        ) : <div className="reading-spacer" key={`spacer-${index}`} aria-hidden="true" />;
+      })}
+    </div>
+  );
+}
+
 function Button({
   children,
   onClick,
@@ -1863,7 +1884,11 @@ function Assistant({ data, updateData, user }) {
         )}
 
         <div className={`bubble ${isUser ? "bubble-user" : "bubble-ai"}`}>
-          <div className="bubble-text">{m.text}{m.streaming && <span className="caret" />}</div>
+          {isUser ? (
+            <div className="bubble-text">{m.text}</div>
+          ) : (
+            <ReadingText className="bubble-text" text={m.text} trailing={m.streaming && <span className="caret" />} />
+          )}
           <div className="bubble-meta">
             <span className="bubble-time">{formatTime(m.time)}</span>
           </div>
@@ -2431,7 +2456,6 @@ function Quiz({ data, updateData }) {
           </div>
 
           <div className="quiz-actions">
-            <Button onClick={() => start(quizQuestions.slice(0, 5))}>Start practice quiz</Button>
             <Button variant="secondary" className="generate-ai-quiz-btn" disabled={generating} onClick={() => generateAiQuiz(selectedTopic)}>
               <Sparkles size={16} /> {generating ? "Generating…" : "Generate AI quiz"}
             </Button>
