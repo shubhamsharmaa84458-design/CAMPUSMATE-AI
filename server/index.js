@@ -88,7 +88,11 @@ async function extractPdfText(buffer, kind = 'syllabus') {
 
 function isUsablePdfText(text) {
   const value = String(text || '').replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '').trim();
-  if (value.length < 20 || /Skia\/PDF/i.test(value)) return false;
+  if (
+    value.length < 20 ||
+    /(?:Skia\/PDF|PDFium|MuPDF|Ghostscript)/i.test(value) ||
+    /^(?:Adobe|Microsoft Print|PDF Creator)\b/i.test(value)
+  ) return false;
   const printable = value.replace(/[^\x20-\x7E\r\n\t]/g, '');
   const letters = (value.match(/[A-Za-z]/g) || []).length;
   return printable.length / value.length >= 0.9 && letters >= 12;
@@ -191,7 +195,7 @@ async function extractPdfWithOpenAI(buffer, kind = 'syllabus') {
       return '';
     }
     const payload = await response.json();
-    return payload?.output
+    return payload?.output_text?.trim() || payload?.output
       ?.flatMap((item) => item.content || [])
       ?.map((item) => item.text || '')
       ?.join('\n')
@@ -537,7 +541,7 @@ app.post('/api/pdf-extract', authMiddleware, upload.single('pdf'), async (req, r
     if (!req.file) return res.status(400).json({ error: 'A PDF file is required' });
     const kind = req.body?.kind === 'notes' ? 'notes' : 'syllabus';
     const text = await extractPdfText(req.file.buffer, kind);
-    if (!text) return res.status(422).json({ error: 'No readable text was found. Please use a text-based PDF or configure GEMINI_API_KEY for scanned PDFs.' });
+    if (!text) return res.status(422).json({ error: 'No readable text was found. For scanned/image PDFs, configure GEMINI_API_KEY or OPENAI_API_KEY for OCR.' });
     return res.json({
       name: req.file.originalname,
       text,
