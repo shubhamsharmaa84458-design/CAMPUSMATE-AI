@@ -72,21 +72,29 @@ async function extractPdfText(buffer) {
   const parser = new PDFParse({ data: buffer });
   try {
     const extracted = (await parser.getText())?.text || '';
-    const meaningful = extracted.replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '').trim();
-    if (meaningful) return extracted;
+    if (isUsablePdfText(extracted)) return extracted;
   } catch (error) {
     console.error('PDF parser text extraction failed; trying raw text fallback:', error);
   } finally {
     await parser.destroy();
   }
   const rawText = extractRawPdfText(buffer);
-  if (rawText.trim()) return rawText;
-  return extractPdfWithGemini(buffer);
+  if (isUsablePdfText(rawText)) return rawText;
+  const aiText = await extractPdfWithGemini(buffer);
+  return isUsablePdfText(aiText) ? aiText : '';
+}
+
+function isUsablePdfText(text) {
+  const value = String(text || '').replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '').trim();
+  if (value.length < 20 || /Skia\/PDF/i.test(value)) return false;
+  const printable = value.replace(/[^\x20-\x7E\r\n\t]/g, '');
+  const letters = (value.match(/[A-Za-z]/g) || []).length;
+  return printable.length / value.length >= 0.9 && letters >= 12;
 }
 
 function extractRawPdfText(buffer) {
   const source = Buffer.from(buffer).toString('latin1');
-  const streams = [source];
+  const streams = [];
   const streamPattern = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
   let streamMatch;
   while ((streamMatch = streamPattern.exec(source))) {
@@ -96,6 +104,7 @@ function extractRawPdfText(buffer) {
       streams.push(streamMatch[1]);
     }
   }
+  if (!streams.length) streams.push(source);
   const strings = [];
   for (const stream of streams) {
     const textPattern = /\(([^()\\]*(?:\\.[^()\\]*)*)\)/g;
@@ -270,12 +279,16 @@ async function initDb() {
       name TEXT NOT NULL,
       course TEXT NOT NULL DEFAULT '',
       subjects JSONB NOT NULL DEFAULT '[]',
+      notes JSONB NOT NULL DEFAULT '[]',
+      syllabus JSONB,
       password_hash TEXT NOT NULL,
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
   await dbClient.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS course TEXT NOT NULL DEFAULT ''");
   await dbClient.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS subjects JSONB NOT NULL DEFAULT '[]'");
+  await dbClient.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS notes JSONB NOT NULL DEFAULT '[]'");
+  await dbClient.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS syllabus JSONB");
   await dbClient.query(`
     CREATE TABLE IF NOT EXISTS messages (
       email TEXT PRIMARY KEY,
@@ -290,9 +303,9 @@ initDb().catch(e => { console.warn('DB init failed (continuing with file-based s
 async function getUserByEmail(email) {
   const key = (email || '').trim().toLowerCase();
   if (useDb && dbClient) {
-    const r = await dbClient.query('SELECT email, name, course, subjects, password_hash FROM users WHERE email = $1', [key]);
+    const r = await dbClient.query('SELECT email, name, course, subjects, notes, syllabus, password_hash FROM users WHERE email = $1', [key]);
     if (!r.rows.length) return null;
-    return { email: r.rows[0].email, name: r.rows[0].name, course: r.rows[0].course || '', subjects: r.rows[0].subjects || [], passwordHash: r.rows[0].password_hash };
+    return { email: r.rows[0].email, name: r.rows[0].name, course: r.rows[0].course || '', subjects: r.rows[0].subjects || [], notes: r.rows[0].notes || [], syllabus: r.rows[0].syllabus || null, passwordHash: r.rows[0].password_hash };
   }
   const users = loadAllUsers();
   return users[key] || null;
@@ -305,21 +318,27 @@ async function createUserRecord(email, name, course, subjects, passwordHash) {
     return { email: key, name, course, subjects };
   }
 
-  async function updateUserSubjects(email, subjects) {
-    const key = (email || '').trim().toLowerCase();
-    if (useDb && dbClient) {
-      await dbClient.query('UPDATE users SET subjects = $1 WHERE email = $2', [JSON.stringify(subjects), key]);
-      return;
-    }
-    const users = loadAllUsers();
-    if (!users[key]) return;
-    users[key].subjects = subjects;
-    saveAllUsers(users);
-  }
   const users = loadAllUsers();
   users[key] = { email: key, name, course, subjects, passwordHash };
   saveAllUsers(users);
   return users[key];
+}
+
+async function updateUserStudyData(email, { subjects, notes, syllabus }) {
+  const key = (email || '').trim().toLowerCase();
+  if (useDb && dbClient) {
+    await dbClient.query(
+      'UPDATE users SET subjects = $1, notes = $2, syllabus = $3 WHERE email = $4',
+      [JSON.stringify(subjects), JSON.stringify(notes), syllabus ? JSON.stringify(syllabus) : null, key]
+    );
+    return;
+  }
+  const users = loadAllUsers();
+  if (!users[key]) return;
+  users[key].subjects = subjects;
+  users[key].notes = notes;
+  users[key].syllabus = syllabus || null;
+  saveAllUsers(users);
 }
 
 async function saveMessagesForEmail(email, chat) {
@@ -446,19 +465,22 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/me', authMiddleware, async (req, res) => {
   const user = await getUserByEmail(req.user?.email);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  return res.json({ user: { email: user.email, name: user.name, course: user.course || '', subjects: user.subjects || [] } });
+  return res.json({ user: { email: user.email, name: user.name, course: user.course || '', subjects: user.subjects || [], notes: user.notes || [], syllabus: user.syllabus || null } });
 });
 
-app.patch('/api/me/subjects', authMiddleware, async (req, res) => {
+app.patch('/api/me/study-data', authMiddleware, async (req, res) => {
   try {
     const subjects = req.body?.subjects;
+    const notes = req.body?.notes;
+    const syllabus = req.body?.syllabus || null;
     if (!Array.isArray(subjects)) return res.status(400).json({ error: 'Subjects must be an array' });
+    if (!Array.isArray(notes)) return res.status(400).json({ error: 'Notes must be an array' });
     if (!req.user?.email) return res.status(400).json({ error: 'Missing email in token' });
-    await updateUserSubjects(req.user.email, subjects);
-    return res.json({ ok: true, subjects });
+    await updateUserStudyData(req.user.email, { subjects, notes, syllabus });
+    return res.json({ ok: true, subjects, notes, syllabus });
   } catch (error) {
-    console.error('Subject update failed:', error);
-    return res.status(500).json({ error: 'Unable to update subjects' });
+    console.error('Study data update failed:', error);
+    return res.status(500).json({ error: 'Unable to update study data' });
   }
 });
 
@@ -466,6 +488,7 @@ app.post('/api/pdf-extract', authMiddleware, upload.single('pdf'), async (req, r
   try {
     if (!req.file) return res.status(400).json({ error: 'A PDF file is required' });
     const text = await extractPdfText(req.file.buffer);
+    if (!text) return res.status(422).json({ error: 'No readable text was found. Please use a text-based PDF or configure GEMINI_API_KEY for scanned PDFs.' });
     return res.json({
       name: req.file.originalname,
       text,

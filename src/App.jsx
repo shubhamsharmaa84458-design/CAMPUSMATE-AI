@@ -491,10 +491,10 @@ function Dashboard({ user, data, setView, updateData }) {
         uploadedAt: new Date().toISOString(),
         subjectIds: payload.subjects?.length ? subjects.map((subject) => subject.id) : [],
       };
-      const saveResponse = await fetch("/api/me/subjects", {
+      const saveResponse = await fetch("/api/me/study-data", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ subjects }),
+        body: JSON.stringify({ subjects, notes: data.notes || [], syllabus: nextSyllabus }),
       });
       if (!saveResponse.ok) {
         const savePayload = await saveResponse.json().catch(() => ({}));
@@ -524,10 +524,10 @@ function Dashboard({ user, data, setView, updateData }) {
           : data.subjects.map((subject) => subject.id)
       );
       const subjects = data.subjects.filter((subject) => !extractedSubjectIds.has(subject.id));
-      const response = await fetch("/api/me/subjects", {
+      const response = await fetch("/api/me/study-data", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ subjects }),
+        body: JSON.stringify({ subjects, notes: data.notes || [], syllabus: null }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || "Unable to delete extracted syllabus");
@@ -1943,7 +1943,17 @@ function Notes({ data, updateData }) {
         text: payload.text,
         uploadedAt: new Date().toISOString(),
       };
-      updateData({ ...data, notes: [...notes, note] });
+      const nextNotes = [...notes, note];
+      const saveResponse = await fetch("/api/me/study-data", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subjects: data.subjects, notes: nextNotes, syllabus: data.syllabus || null }),
+      });
+      if (!saveResponse.ok) {
+        const savePayload = await saveResponse.json().catch(() => ({}));
+        throw new Error(savePayload.error || "Unable to save notes");
+      }
+      updateData({ ...data, notes: nextNotes });
       setChapter("");
     } catch (uploadError) {
       setError(uploadError.message || "Unable to read notes");
@@ -1952,8 +1962,18 @@ function Notes({ data, updateData }) {
     }
   }
 
-  function removeNote(id) {
-    updateData({ ...data, notes: notes.filter((note) => note.id !== id) });
+  async function removeNote(id) {
+    const nextNotes = notes.filter((note) => note.id !== id);
+    const response = await fetch("/api/me/study-data", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subjects: data.subjects, notes: nextNotes, syllabus: data.syllabus || null }),
+    });
+    if (!response.ok) {
+      setError("Unable to delete notes");
+      return;
+    }
+    updateData({ ...data, notes: nextNotes });
   }
 
   return (
@@ -2590,9 +2610,11 @@ export default function App() {
               if (json?.user) {
                 setUser(json.user);
                 const local = getUserData(json.user.email);
-                if (Array.isArray(json.user.subjects) && json.user.subjects.length) {
+                if (Array.isArray(json.user.subjects)) {
                   local.subjects = json.user.subjects;
                 }
+                if (Array.isArray(json.user.notes)) local.notes = json.user.notes;
+                if ("syllabus" in json.user) local.syllabus = json.user.syllabus;
                 setData(local);
 
                 // fetch persisted chat from server
