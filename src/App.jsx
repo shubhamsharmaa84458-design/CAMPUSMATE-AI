@@ -2114,6 +2114,10 @@ function Quiz({ data, updateData }) {
   const [answers, setAnswers] = useState([]);
   const [finished, setFinished] = useState(false);
   const [selectedTopic, setSelectedTopic] = useState("all");
+  const [reviewMode, setReviewMode] = useState(false);
+  const [currentReviewIndex, setCurrentReviewIndex] = useState(0);
+  const [explanations, setExplanations] = useState({});
+  const [explaining, setExplaining] = useState({});
 
   const question = questions[current];
   const topicOptions = data.subjects.flatMap((subject) =>
@@ -2139,6 +2143,10 @@ function Quiz({ data, updateData }) {
     setSelected(null);
     setAnswers([]);
     setFinished(false);
+    setReviewMode(false);
+    setCurrentReviewIndex(0);
+    setExplanations({});
+    setExplaining({});
   }
 
   async function generateAiQuiz(topicOverride = selectedTopic) {
@@ -2167,6 +2175,7 @@ function Quiz({ data, updateData }) {
       if (!contentType.includes("application/json")) {
         throw new Error("Quiz service returned an invalid response.");
       }
+
       const payload = await response.json();
       if (!response.ok || !Array.isArray(payload.questions) || payload.questions.length === 0) throw new Error(payload.error || "Unable to generate quiz");
       start(payload.questions);
@@ -2174,6 +2183,36 @@ function Quiz({ data, updateData }) {
       setQuizError(error.message || "Unable to generate quiz. Try the practice quiz instead.");
     } finally {
       setGenerating(false);
+    }
+  }
+
+  async function explainQuestion(reviewQuestion, reviewIndex) {
+    const key = reviewQuestion.id || String(reviewIndex);
+    if (explanations[key]) return;
+    setExplaining((previous) => ({ ...previous, [key]: true }));
+    try {
+      const response = await fetch("/api/quiz-explain", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("campusmate_token") || ""}`,
+        },
+        body: JSON.stringify({
+          question: reviewQuestion.question,
+          options: reviewQuestion.options,
+          correctAnswerIndex: reviewQuestion.answer,
+          userAnswerIndex: answers[reviewIndex],
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.explanation) {
+        throw new Error(payload.error || "Unable to explain this answer");
+      }
+      setExplanations((previous) => ({ ...previous, [key]: payload.explanation }));
+    } catch (error) {
+      setQuizError(error.message || "Unable to explain this answer");
+    } finally {
+      setExplaining((previous) => ({ ...previous, [key]: false }));
     }
   }
 
@@ -2237,6 +2276,8 @@ function Quiz({ data, updateData }) {
       });
 
       setFinished(true);
+      setReviewMode(false);
+      setCurrentReviewIndex(0);
       return;
     }
 
@@ -2292,6 +2333,74 @@ function Quiz({ data, updateData }) {
   }
 
   if (finished) {
+    if (reviewMode) {
+      const reviewQuestion = questions[currentReviewIndex];
+      const reviewAnswer = answers[currentReviewIndex];
+      const reviewKey = reviewQuestion.id || String(currentReviewIndex);
+      const explanation = explanations[reviewKey];
+      const isLastReviewQuestion = currentReviewIndex === questions.length - 1;
+
+      return (
+        <div className="page">
+          <div className="page-header">
+            <div>
+              <h1>Review Quiz</h1>
+              <p>Review your answers and understand the correct choices.</p>
+            </div>
+            {renderTopicSelector()}
+          </div>
+          <Card className="question-card quiz-review">
+            <div className="question-top">
+              <span>Question {currentReviewIndex + 1} / {questions.length}</span>
+              <span>{reviewQuestion.topic}</span>
+            </div>
+            <h2>{reviewQuestion.question}</h2>
+            <div className="options">
+              {reviewQuestion.options.map((option, index) => {
+                const isCorrect = index === reviewQuestion.answer;
+                const isIncorrectSelection = index === reviewAnswer && reviewAnswer !== reviewQuestion.answer;
+                return (
+                  <div
+                    key={option}
+                    className={`option review-option${isCorrect ? " review-correct" : ""}${isIncorrectSelection ? " review-incorrect" : ""}`}
+                  >
+                    <span className="option-letter">{String.fromCharCode(65 + index)}</span>
+                    {option}
+                  </div>
+                );
+              })}
+            </div>
+            {explanation && <div className="quiz-explanation"><strong>AI explanation</strong><p>{explanation}</p></div>}
+            <div className="review-actions">
+              {currentReviewIndex > 0 ? (
+                <Button variant="secondary" onClick={() => setCurrentReviewIndex((index) => index - 1)}>
+                  ‹ Previous
+                </Button>
+              ) : <span />}
+              <Button
+                variant="secondary"
+                disabled={explaining[reviewKey]}
+                onClick={() => explainQuestion(reviewQuestion, currentReviewIndex)}
+              >
+                {explaining[reviewKey] ? "Explaining…" : "Explain"}
+              </Button>
+              <Button
+                onClick={() => {
+                  if (isLastReviewQuestion) {
+                    setReviewMode(false);
+                  } else {
+                    setCurrentReviewIndex((index) => index + 1);
+                  }
+                }}
+              >
+                {isLastReviewQuestion ? "Close Review" : "Next ›"}
+              </Button>
+            </div>
+          </Card>
+        </div>
+      );
+    }
+
     const last = data.attempts[data.attempts.length - 1];
 
     return (
@@ -2319,9 +2428,18 @@ function Quiz({ data, updateData }) {
             {last?.total || questions.length} questions correctly.
           </p>
 
-          <Button disabled={generating} onClick={generateAiQuiz}>
-            {generating ? "Generating…" : "Try again"}
-          </Button>
+          <div className="quiz-result-actions">
+            <Button variant="secondary" onClick={() => {
+              setReviewMode(true);
+              setCurrentReviewIndex(0);
+              setQuizError("");
+            }}>
+              Review
+            </Button>
+            <Button disabled={generating} onClick={generateAiQuiz}>
+              {generating ? "Generating…" : "Try again"}
+            </Button>
+          </div>
         </Card>
       </div>
     );

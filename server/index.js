@@ -1155,6 +1155,92 @@ app.post('/api/ai-v2', authMiddleware, async (req, res) => {
   }
 });
 
+app.post('/api/quiz-explain', authMiddleware, async (req, res) => {
+  try {
+    const { question, options, correctAnswerIndex, userAnswerIndex } = req.body || {};
+    if (
+      typeof question !== 'string' ||
+      !Array.isArray(options) ||
+      options.length !== 4 ||
+      !Number.isInteger(correctAnswerIndex) ||
+      correctAnswerIndex < 0 ||
+      correctAnswerIndex >= options.length ||
+      !Number.isInteger(userAnswerIndex) ||
+      userAnswerIndex < 0 ||
+      userAnswerIndex >= options.length
+    ) {
+      return res.status(400).json({ error: 'Question, four options, and valid answer indexes are required' });
+    }
+
+    const correctOption = options[correctAnswerIndex];
+    const userOption = options[userAnswerIndex];
+    const prompt = `Explain this multiple-choice answer in 2-4 concise sentences. Explain why the correct option is right. ${userAnswerIndex !== correctAnswerIndex ? 'The student chose a wrong answer, so briefly explain why that choice is a common mistake.' : 'The student answered correctly, so reinforce the key idea.'}
+
+Question: ${question}
+Options: ${options.map((option, index) => `${index}: ${option}`).join(' | ')}
+Correct option: ${correctAnswerIndex}: ${correctOption}
+Student option: ${userAnswerIndex}: ${userOption}
+Return only the explanation text.`;
+    let explanation = '';
+
+    if (process.env.ANTHROPIC_API_KEY) {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-5',
+          max_tokens: 300,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      });
+      if (response.ok) {
+        const payload = await response.json();
+        explanation = payload?.content?.map((block) => block?.text || '').join('').trim() || '';
+      }
+    }
+
+    if (!explanation && hasGeminiKey) {
+      for (const model of await getGeminiModels()) {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+        });
+        if (response.ok) {
+          const payload = await response.json();
+          explanation = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
+          if (explanation) break;
+        }
+      }
+    }
+
+    if (!explanation && hasOpenAIKey) {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
+        body: JSON.stringify({
+          model: OPENAI_MODEL,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      });
+      if (response.ok) {
+        const payload = await response.json();
+        explanation = payload?.choices?.[0]?.message?.content?.trim() || '';
+      }
+    }
+
+    if (!explanation) return res.status(502).json({ error: 'No AI provider returned an explanation' });
+    return res.json({ explanation });
+  } catch (error) {
+    console.error('Quiz explanation failed:', error);
+    return res.status(502).json({ error: 'Unable to generate quiz explanation' });
+  }
+});
+
 function sendSse(res, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
