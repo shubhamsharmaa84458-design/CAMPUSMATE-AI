@@ -11,6 +11,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import multer from "multer";
 import { PDFParse } from "pdf-parse";
+import { inflateSync } from "zlib";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -71,29 +72,77 @@ async function extractPdfText(buffer) {
   const parser = new PDFParse({ data: buffer });
   try {
     const extracted = (await parser.getText())?.text || '';
-    if (extracted.trim()) return extracted;
+    const meaningful = extracted.replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '').trim();
+    if (meaningful) return extracted;
   } catch (error) {
     console.error('PDF parser text extraction failed; trying raw text fallback:', error);
   } finally {
     await parser.destroy();
   }
-  return extractRawPdfText(buffer);
+  const rawText = extractRawPdfText(buffer);
+  if (rawText.trim()) return rawText;
+  return extractPdfWithGemini(buffer);
 }
 
 function extractRawPdfText(buffer) {
   const source = Buffer.from(buffer).toString('latin1');
-  const strings = [];
-  const textPattern = /\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*T[jJ]/g;
-  let match;
-  while ((match = textPattern.exec(source))) {
-    const value = match[1]
-      .replace(/\\([\\()])/g, '$1')
-      .replace(/\\n/g, ' ')
-      .replace(/\\r/g, ' ')
-      .trim();
-    if (value) strings.push(value);
+  const streams = [source];
+  const streamPattern = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let streamMatch;
+  while ((streamMatch = streamPattern.exec(source))) {
+    try {
+      streams.push(inflateSync(Buffer.from(streamMatch[1], 'latin1')).toString('latin1'));
+    } catch {
+      streams.push(streamMatch[1]);
+    }
   }
-  return strings.join('\n');
+  const strings = [];
+  for (const stream of streams) {
+    const textPattern = /\(([^()\\]*(?:\\.[^()\\]*)*)\)/g;
+    let match;
+    while ((match = textPattern.exec(stream))) {
+      const value = match[1]
+        .replace(/\\([\\()])/g, '$1')
+        .replace(/\\n/g, ' ')
+        .replace(/\\r/g, ' ')
+        .trim();
+      if (value && /[A-Za-z]{2,}/.test(value)) strings.push(value);
+    }
+    const hexPattern = /<([0-9a-f]{4,})>\s*T[jJ]/gi;
+    while ((match = hexPattern.exec(stream))) {
+      const bytes = Buffer.from(match[1], 'hex');
+      for (let index = 0; index + 1 < bytes.length; index += 2) {
+        [bytes[index], bytes[index + 1]] = [bytes[index + 1], bytes[index]];
+      }
+      const value = bytes.toString('utf16le').trim();
+      if (value && /[A-Za-z]{2,}/.test(value)) strings.push(value);
+    }
+  }
+  return [...new Set(strings)].join('\n');
+}
+
+async function extractPdfWithGemini(buffer) {
+  if (!hasGeminiKey) return '';
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: 'Read this syllabus PDF. Return all visible subjects and their chapter/unit/topic names using exactly this format, with no commentary: SUBJECT: <subject name> followed by one or more TOPIC: <topic name> lines. Include every subject and topic you can read.' },
+            { inlineData: { mimeType: 'application/pdf', data: Buffer.from(buffer).toString('base64') } },
+          ],
+        }],
+      }),
+    });
+    if (!response.ok) return '';
+    const payload = await response.json();
+    return payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('\n').trim() || '';
+  } catch (error) {
+    console.error('Gemini PDF extraction failed:', error);
+    return '';
+  }
 }
 
 function parseSyllabusText(text) {
@@ -110,19 +159,61 @@ function parseSyllabusText(text) {
     }
     const subjects = [];
     const seen = new Set();
-    const addSubject = (name, code = '') => {
+    const addSubject = (name, code = '', topicNames = []) => {
       const normalized = name.replace(/\s+/g, ' ').trim();
       const key = normalized.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
       if (!normalized || normalized.length < 4 || seen.has(key) || /https?:\/\//i.test(normalized)) return;
       if (/^(syllabus|semester|university|b\.?tech|department|credits?|introduction|objectives|references|total|elective|lecture|tutorial|course outcomes?)\b/i.test(normalized)) return;
       seen.add(key);
-      subjects.push({ id: `pdf-${subjects.length + 1}`, name: normalized, code, topics: [{ id: `pdf-topic-${subjects.length + 1}`, name: normalized, mastery: 0 }] });
+      const topics = [...new Set(topicNames.map((topic) => topic.replace(/^\s*(?:\d+[\s.)-]+)+/, '').trim()).filter((topic) => topic.length >= 3))];
+      subjects.push({
+        id: `pdf-${subjects.length + 1}`,
+        name: normalized,
+        code,
+        topics: (topics.length ? topics : [normalized]).slice(0, 20).map((topic, index) => ({
+          id: `pdf-topic-${subjects.length + 1}-${index + 1}`,
+          name: topic,
+          mastery: 0,
+        })),
+      });
     };
+    const labeledSubjects = [];
+    let currentSubject = null;
+    for (const line of rawLines) {
+      const subjectMatch = line.match(/^SUBJECT\s*:\s*(.+)$/i);
+      const topicMatch = line.match(/^(?:TOPIC|UNIT|CHAPTER)\s*:\s*(.+)$/i);
+      if (subjectMatch) {
+        currentSubject = { name: subjectMatch[1].trim(), topics: [] };
+        labeledSubjects.push(currentSubject);
+      } else if (topicMatch && currentSubject) {
+        currentSubject.topics.push(topicMatch[1].trim());
+      }
+    }
+    if (labeledSubjects.length) {
+      labeledSubjects.forEach((subject) => addSubject(subject.name, '', subject.topics));
+      return subjects;
+    }
+    const codedLines = lines.map((line, index) => ({
+      index,
+      match: line.match(/^\s*([A-Z]{2,8}[-\s]?\d{2,4})\s*[:.)-]?\s+(.{4,120})$/i),
+    })).filter((entry) => entry.match);
+    if (codedLines.length) {
+      for (let index = 0; index < codedLines.length && subjects.length < 30; index += 1) {
+        const current = codedLines[index];
+        const nextIndex = codedLines[index + 1]?.index ?? lines.length;
+        const topics = lines.slice(current.index + 1, nextIndex)
+          .filter((line) => line.length >= 4 && line.length <= 100)
+          .filter((line) => !/^(syllabus|semester|university|department|credits?|introduction|objectives|references|total|elective|lecture|tutorial|course outcomes?)\b/i.test(line))
+          .slice(0, 12);
+        addSubject(current.match[2], current.match[1].toUpperCase(), topics);
+      }
+      if (subjects.length) return subjects;
+    }
     for (const line of lines) {
       if (line.length < 4 || /^\d+$/.test(line)) continue;
       const codeMatch = line.match(/^\s*([A-Z]{2,8}[-\s]?\d{2,4})\s*[:.)-]?\s+(.{4,120})$/i);
       if (codeMatch) {
-        addSubject(codeMatch[2], codeMatch[1].toUpperCase());
+        addSubject(codeMatch[2], codeMatch[1].toUpperCase(), codeMatch[2].split(/[,;|]/).slice(1));
         if (subjects.length >= 30) break;
         continue;
       }
