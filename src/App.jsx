@@ -82,6 +82,7 @@ const defaultData = {
   chat: [],
   syllabus: null,
   notes: [],
+  attendance: {},
 };
 
 const uid = () =>
@@ -356,6 +357,7 @@ function Sidebar({ view, setView, user, logout }) {
     ["dashboard", "Dashboard", LayoutDashboard],
     ["subjects", "Subjects", BookOpen],
     ["notes", "Chapter Notes", FileText],
+    ["attendance", "Attendance", CalendarDays],
     ["planner", "Study Planner", CalendarDays],
     ["assistant", "AI Assistant", Sparkles],
     ["quiz", "Quiz", Brain],
@@ -1053,6 +1055,42 @@ function TopicModal({ subject, data, updateData, close }) {
 /* =========================================================
    PLANNER
 ========================================================= */
+
+function Attendance({ data, updateData }) {
+  const today = new Date();
+  const [month, setMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
+  const [subjectId, setSubjectId] = useState(data.subjects[0]?.id || "");
+  const records = (data.attendance || {})[subjectId] || {};
+  const year = month.getFullYear();
+  const monthIndex = month.getMonth();
+  const firstDay = new Date(year, monthIndex, 1).getDay();
+  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+  const values = Object.values(records);
+  const present = values.filter((value) => value === "present").length;
+  const absent = values.filter((value) => value === "absent").length;
+  const percentage = present + absent ? Math.round((present / (present + absent)) * 100) : 0;
+  const dateKey = (day) => `${year}-${String(monthIndex + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const mark = (day) => {
+    const key = dateKey(day);
+    const next = { ...records };
+    next[key] = records[key] === "present" ? "absent" : records[key] === "absent" ? undefined : "present";
+    if (!next[key]) delete next[key];
+    updateData({ ...data, attendance: { ...(data.attendance || {}), [subjectId]: next } });
+  };
+  return (
+    <div className="page">
+      <div className="page-header"><div><h1>Attendance Tracker</h1><p>Mark daily attendance and track your subject-wise percentage.</p></div>
+        <select className="attendance-subject" value={subjectId} onChange={(event) => setSubjectId(event.target.value)}>{data.subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.name}</option>)}</select>
+      </div>
+      <div className="attendance-summary"><div><span>Attendance</span><strong>{percentage}%</strong></div><div><span>Present</span><strong>{present}</strong></div><div><span>Absent</span><strong>{absent}</strong></div></div>
+      <Card><div className="attendance-month"><button className="icon-btn" onClick={() => setMonth(new Date(year, monthIndex - 1, 1))} aria-label="Previous month">‹</button><h2>{month.toLocaleString("default", { month: "long", year: "numeric" })}</h2><button className="icon-btn" onClick={() => setMonth(new Date(year, monthIndex + 1, 1))} aria-label="Next month">›</button></div>
+        <div className="attendance-weekdays">{["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => <span key={day}>{day}</span>)}</div>
+        <div className="attendance-calendar">{Array.from({ length: firstDay }).map((_, index) => <span className="attendance-empty" key={`empty-${index}`} />)}{Array.from({ length: daysInMonth }, (_, index) => { const day = index + 1; const status = records[dateKey(day)]; return <button key={day} className={`attendance-day ${status || ""}`} onClick={() => mark(day)} title="Cycle present, absent, and clear"><strong>{day}</strong><small>{status === "present" ? "P" : status === "absent" ? "A" : "—"}</small></button>; })}</div>
+        <p className="attendance-help"><span className="attendance-dot present" /> Present <span className="attendance-dot absent" /> Absent · Click a day to cycle status.</p>
+      </Card>
+    </div>
+  );
+}
 
 function Planner({ data, updateData }) {
   const [show, setShow] = useState(false);
@@ -2579,6 +2617,9 @@ export default function App() {
         return (
           <Planner data={data} updateData={updateData} />
         );
+
+      case "attendance":
+        return <Attendance data={data} updateData={updateData} />;
 
       case "assistant":
         return (
