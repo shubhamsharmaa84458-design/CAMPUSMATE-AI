@@ -120,6 +120,22 @@ function saveUserData(email, data) {
   );
 }
 
+async function readApiResponse(response, fallbackMessage) {
+  const body = await response.text();
+  let payload = {};
+  try {
+    payload = body ? JSON.parse(body) : {};
+  } catch {
+    throw new Error(
+      response.status === 404
+        ? "The PDF service is unavailable. Please wait for the server deployment to finish and try again."
+        : `${fallbackMessage} (server returned ${response.status})`
+    );
+  }
+  if (!response.ok) throw new Error(payload.error || fallbackMessage);
+  return payload;
+}
+
 function Button({
   children,
   onClick,
@@ -483,8 +499,7 @@ function Dashboard({ user, data, setView, updateData }) {
       form.append("pdf", file);
       form.append("kind", "syllabus");
       const response = await fetch("/api/pdf-extract", { method: "POST", body: form });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Unable to read syllabus");
+      const payload = await readApiResponse(response, "Unable to read syllabus");
       const subjects = payload.subjects?.length ? payload.subjects : data.subjects;
       const nextSyllabus = {
         name: payload.name,
@@ -1936,8 +1951,7 @@ function Notes({ data, updateData }) {
       form.append("pdf", file);
       form.append("kind", "notes");
       const response = await fetch("/api/pdf-extract", { method: "POST", body: form });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Unable to read notes");
+      const payload = await readApiResponse(response, "Unable to read notes");
       const note = {
         id: uid(),
         chapter: chapter.trim(),

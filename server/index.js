@@ -1044,6 +1044,16 @@ app.post('/api/ai-stream-v2', authMiddleware, async (req, res) => {
   }
 });
 
+app.use('/api', (req, res) => {
+  return res.status(404).json({ error: 'API route not found' });
+});
+
+app.use('/api', (error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  console.error('API request failed:', error);
+  return res.status(error.statusCode || 500).json({ error: error.message || 'API request failed' });
+});
+
 // In production the Express service serves the Vite build and provides SPA fallback.
 // Keep API routes above this middleware so /api requests are never swallowed.
 const distDir = path.join(projectRoot, 'dist');
