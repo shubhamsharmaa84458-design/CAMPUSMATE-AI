@@ -7,6 +7,7 @@ import {
   Brain,
   BarChart3,
   Compass,
+  FileText,
   LogOut,
   Plus,
   X,
@@ -79,6 +80,8 @@ const defaultData = {
   tasks: [],
   attempts: [],
   chat: [],
+  syllabus: null,
+  notes: [],
 };
 
 const uid = () =>
@@ -159,7 +162,6 @@ function Auth({ onLogin }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [course, setCourse] = useState("");
-  const [syllabus, setSyllabus] = useState(null);
   const [error, setError] = useState("");
 
   async function submit(e) {
@@ -191,7 +193,6 @@ function Auth({ onLogin }) {
         form.append("email", cleanEmail);
         form.append("password", password);
         form.append("course", course.trim());
-        if (syllabus) form.append("syllabus", syllabus);
         const resp = await fetch("/api/register", {
           method: "POST",
           body: form,
@@ -309,13 +310,6 @@ function Auth({ onLogin }) {
                   placeholder="B.Tech CSE"
                 />
 
-                <label>Syllabus PDF (optional)</label>
-                <input
-                  type="file"
-                  accept="application/pdf,.pdf"
-                  onChange={(e) => setSyllabus(e.target.files?.[0] || null)}
-                />
-                <p className="small muted">Upload your syllabus PDF to automatically create subjects and topics.</p>
               </>
             )}
 
@@ -361,6 +355,7 @@ function Sidebar({ view, setView, user, logout }) {
   const items = [
     ["dashboard", "Dashboard", LayoutDashboard],
     ["subjects", "Subjects", BookOpen],
+    ["notes", "Chapter Notes", FileText],
     ["planner", "Study Planner", CalendarDays],
     ["assistant", "AI Assistant", Sparkles],
     ["quiz", "Quiz", Brain],
@@ -434,7 +429,10 @@ function Sidebar({ view, setView, user, logout }) {
    DASHBOARD
 ========================================================= */
 
-function Dashboard({ user, data, setView }) {
+function Dashboard({ user, data, setView, updateData }) {
+  const [uploading, setUploading] = useState(false);
+  const [syllabusError, setSyllabusError] = useState("");
+  const syllabus = data.syllabus;
   const topicCount = data.subjects.reduce(
     (total, subject) => total + subject.topics.length,
     0
@@ -469,6 +467,30 @@ function Dashboard({ user, data, setView }) {
       ? "Good afternoon"
       : "Good evening";
 
+  async function uploadSyllabus(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setUploading(true);
+    setSyllabusError("");
+    try {
+      const form = new FormData();
+      form.append("pdf", file);
+      const response = await fetch("/api/pdf-extract", { method: "POST", body: form });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Unable to read syllabus");
+      updateData({
+        ...data,
+        syllabus: { name: payload.name, text: payload.text, uploadedAt: new Date().toISOString() },
+        subjects: payload.subjects?.length ? payload.subjects : data.subjects,
+      });
+    } catch (error) {
+      setSyllabusError(error.message || "Unable to read syllabus");
+    } finally {
+      setUploading(false);
+    }
+  }
+
   return (
     <div className="page">
       <div className="page-header">
@@ -484,6 +506,25 @@ function Dashboard({ user, data, setView }) {
           Plan study
         </Button>
       </div>
+
+      <Card className="syllabus-upload-card">
+        <SectionTitle
+          title="Upload your syllabus"
+          action={syllabus && <span className="small muted">Last file: {syllabus.name}</span>}
+        />
+        <p className="muted small">Upload a text-based PDF to automatically create subjects and starter topics.</p>
+        <label className="upload-button btn btn-secondary">
+          <FileText size={16} /> {uploading ? "Reading PDF…" : "Choose syllabus PDF"}
+          <input type="file" accept="application/pdf,.pdf" onChange={uploadSyllabus} hidden disabled={uploading} />
+        </label>
+        {syllabus && (
+          <details className="syllabus-preview">
+            <summary>View extracted syllabus</summary>
+            <pre>{syllabus.text || "No text was found."}</pre>
+          </details>
+        )}
+        {syllabusError && <div className="error">{syllabusError}</div>}
+      </Card>
 
       <div className="stats-grid">
         <StatCard
@@ -1761,6 +1802,81 @@ function Assistant({ data, updateData, user }) {
   );
 }
 
+function Notes({ data, updateData }) {
+  const [chapter, setChapter] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const notes = data.notes || [];
+
+  async function uploadNote(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !chapter.trim()) {
+      setError("Enter a chapter name before choosing a PDF.");
+      return;
+    }
+    setUploading(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.append("pdf", file);
+      const response = await fetch("/api/pdf-extract", { method: "POST", body: form });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Unable to read notes");
+      const note = {
+        id: uid(),
+        chapter: chapter.trim(),
+        name: payload.name,
+        text: payload.text,
+        uploadedAt: new Date().toISOString(),
+      };
+      updateData({ ...data, notes: [...notes, note] });
+      setChapter("");
+    } catch (uploadError) {
+      setError(uploadError.message || "Unable to read notes");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function removeNote(id) {
+    updateData({ ...data, notes: notes.filter((note) => note.id !== id) });
+  }
+
+  return (
+    <div className="page">
+      <div className="page-header">
+        <div>
+          <h1>Chapter Notes</h1>
+          <p>Upload chapter PDFs so AI Quiz can create questions from your study material.</p>
+        </div>
+      </div>
+      <Card>
+        <label htmlFor="note-chapter">Chapter name</label>
+        <input id="note-chapter" value={chapter} onChange={(event) => setChapter(event.target.value)} placeholder="Chapter 1: Arrays" />
+        <label className="upload-button btn btn-primary">
+          <FileText size={16} /> {uploading ? "Reading notes…" : "Upload chapter PDF"}
+          <input type="file" accept="application/pdf,.pdf" onChange={uploadNote} hidden disabled={uploading} />
+        </label>
+        {error && <div className="error">{error}</div>}
+      </Card>
+      <div className="notes-grid">
+        {notes.length === 0 ? (
+          <Card><Empty icon={<FileText size={35} />} title="No notes uploaded" text="Add chapter PDFs to personalize your quizzes." /></Card>
+        ) : notes.map((note) => (
+          <Card key={note.id} className="note-card">
+            <div className="card-top">
+              <div><h2>{note.chapter}</h2><p className="small muted">{note.name}</p></div>
+              <button className="icon-btn danger-icon" onClick={() => removeNote(note.id)}><Trash2 size={16} /></button>
+            </div>
+            <details><summary>View extracted notes</summary><pre>{note.text || "No text was found."}</pre></details>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* =========================================================
    QUIZ
 ========================================================= */
@@ -1856,8 +1972,14 @@ function Quiz({ data, updateData }) {
       value: `${subject.name}: ${topic.name}`,
     }))
   );
-  const topicPrompt = topicOptions.map((topic) => topic.value).join("|");
-  const selectedTopicValue = topicOptions.find((topic) => topic.id === selectedTopic)?.value;
+  const noteOptions = (data.notes || []).map((note) => ({
+    id: `note:${note.id}`,
+    label: `Notes: ${note.chapter}`,
+    value: note.chapter,
+  }));
+  const practiceOptions = [...topicOptions, ...noteOptions];
+  const topicPrompt = practiceOptions.map((topic) => topic.value).join("|");
+  const selectedTopicValue = practiceOptions.find((topic) => topic.id === selectedTopic)?.value;
 
   function start(nextQuestions = questions) {
     setQuestions(nextQuestions);
@@ -1873,13 +1995,17 @@ function Quiz({ data, updateData }) {
     setQuizError("");
     try {
       const topics = topicOverride === "all"
-        ? topicOptions.map((topic) => topic.value)
-        : topicOptions.filter((topic) => topic.id === topicOverride).map((topic) => topic.value);
+        ? practiceOptions.map((topic) => topic.value)
+        : practiceOptions.filter((topic) => topic.id === topicOverride).map((topic) => topic.value);
+      const materials = (data.notes || [])
+        .filter((note) => topicOverride === "all" || topicOverride === `note:${note.id}` || !topicOverride.startsWith("note:"))
+        .map((note) => ({ topic: note.chapter, text: note.text }));
       const response = await fetch("/api/quiz-generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           topics,
+          materials,
           count: 5,
         }),
       });
@@ -1917,7 +2043,7 @@ function Quiz({ data, updateData }) {
           }}
         >
           <option value="all">All topics</option>
-          {topicOptions.map((topic) => (
+          {practiceOptions.map((topic) => (
             <option key={topic.id} value={topic.id}>{topic.label}</option>
           ))}
         </select>
@@ -2446,6 +2572,9 @@ export default function App() {
           <Subjects data={data} updateData={updateData} />
         );
 
+      case "notes":
+        return <Notes data={data} updateData={updateData} />;
+
       case "planner":
         return (
           <Planner data={data} updateData={updateData} />
@@ -2471,6 +2600,7 @@ export default function App() {
             user={user}
             data={data}
             setView={setView}
+            updateData={updateData}
           />
         );
     }

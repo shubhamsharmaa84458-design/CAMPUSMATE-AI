@@ -63,16 +63,22 @@ function loadQuizHistory() { try { return JSON.parse(fs.readFileSync(QUIZ_HISTOR
 function saveQuizHistory(history) { fs.writeFileSync(QUIZ_HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8'); }
 
 async function parseSyllabus(buffer) {
+  const result = await extractPdfText(buffer);
+  return parseSyllabusText(result);
+}
+
+async function extractPdfText(buffer) {
   const parser = new PDFParse({ data: buffer });
   try {
-    let result;
-    try {
-      result = await parser.getText();
-    } catch (error) {
-      console.error('Syllabus PDF text extraction failed:', error);
-      return [];
-    }
-    const lines = (result?.text || '')
+    return (await parser.getText())?.text || '';
+  } finally {
+    await parser.destroy();
+  }
+}
+
+function parseSyllabusText(text) {
+  try {
+    const lines = text
       .split(/\r?\n/)
       .flatMap((line) => line.split(/\s{2,}|\t/))
       .map((line) => line.replace(/\s+/g, ' ').trim())
@@ -113,8 +119,6 @@ async function parseSyllabus(buffer) {
   } catch (error) {
     console.error('Syllabus parsing failed:', error);
     return [];
-  } finally {
-    await parser.destroy();
   }
 }
 
@@ -299,6 +303,21 @@ app.get('/api/me', authMiddleware, (req, res) => {
   return res.json({ user: req.user });
 });
 
+app.post('/api/pdf-extract', authMiddleware, upload.single('pdf'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'A PDF file is required' });
+    const text = await extractPdfText(req.file.buffer);
+    return res.json({
+      name: req.file.originalname,
+      text,
+      subjects: parseSyllabusText(text),
+    });
+  } catch (error) {
+    console.error('PDF extraction failed:', error);
+    return res.status(422).json({ error: 'Unable to read this PDF. Please use a text-based PDF.' });
+  }
+});
+
 // Messages endpoints (require auth)
 app.post('/api/messages', authMiddleware, async (req, res) => {
   try {
@@ -329,14 +348,21 @@ app.get('/api/messages', authMiddleware, async (req, res) => {
 app.post('/api/quiz-generate', authMiddleware, async (req, res) => {
   const topics = Array.isArray(req.body?.topics) ? req.body.topics.filter(Boolean) : [];
   const pool = topics.length ? [...new Set(topics)] : ['Data Structures', 'DBMS', 'Computer Networks'];
+  const materials = Array.isArray(req.body?.materials) ? req.body.materials : [];
   const count = Math.max(1, Math.min(10, Number(req.body?.count) || 5));
   const history = loadQuizHistory();
   const email = req.user?.email || 'anonymous';
   const used = new Set(history[email] || []);
 
+  const materialText = materials
+    .map((material) => `${material.topic}: ${String(material.text || '').slice(0, 12000)}`)
+    .join('\n\n');
   const quizPrompt = `Create ${count} important, distinct multiple-choice questions for a student practicing these topics: ${pool.join(', ')}.
 Return ONLY valid JSON in this exact shape: {"questions":[{"topic":"topic name","question":"...","options":["...","...","...","..."],"answer":0}]}.
-The answer must be the zero-based index of the correct option. Avoid these previously used question texts: ${JSON.stringify([...used].slice(-30))}`;
+The answer must be the zero-based index of the correct option. Use the supplied chapter notes when available and test important concepts, definitions, applications, and likely exam points. Avoid these previously used question texts: ${JSON.stringify([...used].slice(-30))}
+
+Chapter notes:
+${materialText || 'No chapter notes supplied.'}`;
   try {
     let payload;
     if (hasGeminiKey) {
