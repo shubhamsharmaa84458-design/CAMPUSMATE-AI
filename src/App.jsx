@@ -2263,31 +2263,40 @@ function Quiz({ data, updateData }) {
     }
   }
 
-  function applyQuizMastery(questionSet, answerSet) {
+  function applyQuizMastery(questionSet, answerSet, currentData = data) {
     const normalize = (value) => String(value || "").trim().toLowerCase();
-    const subjects = data.subjects.map((subject) => ({
+    const subjects = currentData.subjects.map((subject) => ({
       ...subject,
       topics: subject.topics.map((topic) => ({ ...topic })),
     }));
     let changed = false;
+    const selectedTopicParts = selectedTopic.split(":");
+    const selectedTopicId = selectedTopicParts.length === 2 ? selectedTopicParts[1] : "";
 
     questionSet.forEach((quizQuestion, index) => {
       const questionTopic = normalize(quizQuestion.topic);
       const answer = answerSet[index];
       if (!questionTopic || !Number.isInteger(answer)) return;
 
-      const exactMatches = [];
+      const matches = [];
       subjects.forEach((subject) => {
         subject.topics.forEach((topic) => {
           const topicName = normalize(topic.name);
           const subjectTopic = normalize(`${subject.name}: ${topic.name}`);
-          if (questionTopic === topicName || questionTopic === subjectTopic) {
-            exactMatches.push(topic);
+          if (
+            questionTopic === topicName
+            || questionTopic === subjectTopic
+            || questionTopic.endsWith(`: ${topicName}`)
+            || questionTopic.includes(topicName)
+          ) {
+            matches.push(topic);
           }
         });
       });
 
-      const matchedTopic = exactMatches.length === 1 ? exactMatches[0] : null;
+      const matchedTopic = matches.length === 1
+        ? matches[0]
+        : subjects.flatMap((subject) => subject.topics).find((topic) => topic.id === selectedTopicId);
       if (!matchedTopic) return;
 
       const correct = answer === quizQuestion.answer;
@@ -2298,27 +2307,7 @@ function Quiz({ data, updateData }) {
       changed = true;
     });
 
-    if (!changed) return;
-
-    const nextData = { ...data, subjects };
-    updateData(nextData);
-    const token = localStorage.getItem("campusmate_token");
-    if (token) {
-      fetch("/api/me/study-data", {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `******`,
-        },
-        body: JSON.stringify({
-          subjects,
-          notes: nextData.notes,
-          syllabus: nextData.syllabus || null,
-        }),
-      }).catch((error) => {
-        console.error("Unable to persist quiz mastery:", error);
-      });
-    }
+    return changed ? subjects : currentData.subjects;
   }
 
   function renderTopicSelector() {
@@ -2362,8 +2351,6 @@ function Quiz({ data, updateData }) {
         (correct / questions.length) * 100
       );
 
-      applyQuizMastery(questions, newAnswers);
-
       const attempt = {
         id: uid(),
         date: new Date().toISOString().slice(0, 10),
@@ -2372,10 +2359,31 @@ function Quiz({ data, updateData }) {
         total: questions.length,
       };
 
-      updateData({
+      const subjects = applyQuizMastery(questions, newAnswers);
+      const nextData = {
         ...data,
+        subjects,
         attempts: [...data.attempts, attempt],
-      });
+      };
+      updateData(nextData);
+
+      const token = localStorage.getItem("campusmate_token");
+      if (token) {
+        fetch("/api/me/study-data", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `******`,
+          },
+          body: JSON.stringify({
+            subjects,
+            notes: nextData.notes,
+            syllabus: nextData.syllabus || null,
+          }),
+        }).catch((error) => {
+          console.error("Unable to persist quiz mastery:", error);
+        });
+      }
 
       setFinished(true);
       setReviewMode(false);
