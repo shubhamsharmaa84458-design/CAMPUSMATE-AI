@@ -63,9 +63,100 @@ function saveAllMessages(obj) { fs.writeFileSync(MESSAGES_FILE, JSON.stringify(o
 function loadQuizHistory() { try { return JSON.parse(fs.readFileSync(QUIZ_HISTORY_FILE, 'utf8') || '{}'); } catch { return {}; } }
 function saveQuizHistory(history) { fs.writeFileSync(QUIZ_HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8'); }
 
+async function loadQuizHistoryForEmail(email) {
+  const key = (email || '').trim().toLowerCase();
+  if (useDb && dbClient) {
+    const result = await dbClient.query('SELECT questions FROM quiz_history WHERE email = $1', [key]);
+    return result.rows[0]?.questions || [];
+  }
+  return loadQuizHistory()[key] || [];
+}
+
+async function saveQuizHistoryForEmail(email, questions) {
+  const key = (email || '').trim().toLowerCase();
+  if (useDb && dbClient) {
+    await dbClient.query(
+      'INSERT INTO quiz_history(email, questions, updated_at) VALUES($1, $2, NOW()) ON CONFLICT (email) DO UPDATE SET questions = $2, updated_at = NOW()',
+      [key, JSON.stringify(questions)]
+    );
+    return;
+  }
+  const history = loadQuizHistory();
+  history[key] = questions;
+  saveQuizHistory(history);
+}
+
 async function parseSyllabus(buffer) {
   const result = await extractPdfText(buffer);
-  return parseSyllabusText(result);
+  if (!result) return [];
+  const aiSubjects = await parseSyllabusWithAI(result);
+  return aiSubjects.length ? aiSubjects : parseSyllabusText(result);
+}
+
+async function parseSyllabusWithAI(text) {
+  const prompt = `Extract every subject/course from this syllabus. Return only valid JSON in this exact shape:
+{"subjects":[{"name":"Subject name","code":"COURSE CODE","topics":["topic 1","topic 2"]}]}
+Do not include university metadata, semesters, credits, headings, or explanations. If a code or topics are unavailable, use an empty string or empty array.
+
+SYLLABUS:
+${text.slice(0, 50000)}`;
+  try {
+    let responseText = '';
+    if (hasGeminiKey) {
+      for (const model of await getGeminiModels()) {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+        });
+        if (response.ok) {
+          const payload = await response.json();
+          responseText = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '';
+          if (responseText) break;
+        }
+      }
+    }
+    if (!responseText && hasOpenAIKey) {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
+        body: JSON.stringify({
+          model: OPENAI_MODEL,
+          messages: [{ role: 'user', content: prompt }],
+          response_format: { type: 'json_object' },
+        }),
+      });
+      if (response.ok) {
+        const payload = await response.json();
+        responseText = payload?.choices?.[0]?.message?.content || '';
+      }
+    }
+    const jsonText = responseText.replace(/^```json\s*|\s*```$/gi, '').trim();
+    const parsed = JSON.parse(jsonText);
+    if (!Array.isArray(parsed?.subjects)) return [];
+    return parsed.subjects
+      .filter((subject) => subject && typeof subject.name === 'string')
+      .map((subject) => ({
+        name: subject.name.trim(),
+        code: typeof subject.code === 'string' ? subject.code.trim() : '',
+        topics: Array.isArray(subject.topics) ? subject.topics.filter((topic) => typeof topic === 'string') : [],
+      }))
+      .filter((subject) => subject.name.length >= 4)
+      .slice(0, 30)
+      .map((subject, index) => ({
+        id: `pdf-${index + 1}`,
+        name: subject.name,
+        code: subject.code,
+        topics: (subject.topics.length ? subject.topics : [subject.name]).slice(0, 20).map((name, topicIndex) => ({
+          id: `pdf-topic-${index + 1}-${topicIndex + 1}`,
+          name: name.trim(),
+          mastery: 0,
+        })),
+      }));
+  } catch (error) {
+    console.error('AI syllabus parsing failed; using heuristic parser:', error);
+    return [];
+  }
 }
 
 async function extractPdfText(buffer, kind = 'syllabus') {
@@ -177,7 +268,7 @@ async function getGeminiModels() {
         .filter((model) => model.supportedGenerationMethods?.includes('generateContent'))
         .map((model) => model.name?.replace(/^models\//, ''))
         .filter(Boolean);
-      candidates.push(...available.filter((model) => /flash|pro/i.test(model)));
+      return [...new Set([...available.filter((model) => /flash|pro/i.test(model)), ...candidates])];
     }
   } catch (error) {
     console.error('Unable to discover Gemini models:', error);
@@ -338,7 +429,10 @@ let dbClient = null;
 let useDb = false;
 async function initDb() {
   const url = process.env.DATABASE_URL;
-  if (!url) return;
+  if (!url) {
+    if (process.env.NODE_ENV === 'production') console.warn('DATABASE_URL is missing; production data will not survive redeploys.');
+    return;
+  }
   dbClient = new Client({ connectionString: url });
   await dbClient.connect();
   useDb = true;
@@ -363,6 +457,13 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS messages (
       email TEXT PRIMARY KEY,
       chat JSONB,
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await dbClient.query(`
+    CREATE TABLE IF NOT EXISTS quiz_history (
+      email TEXT PRIMARY KEY,
+      questions JSONB NOT NULL DEFAULT '[]',
       updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
@@ -440,6 +541,10 @@ app.use('/api', limiter);
 
 // serve public for debug page
 app.use(express.static(path.join(__dirname, 'public')));
+
+app.get('/api/ping', (_req, res) => {
+  res.json({ ok: true, uptime: Math.round(process.uptime()) });
+});
 
 // Middleware: accept either PROXY_KEY or valid JWT for /api endpoints when PROXY_KEY is set
 function requireProxyKeyOrJwt(req, res, next) {
@@ -560,11 +665,12 @@ app.post('/api/pdf-extract', authMiddleware, upload.single('pdf'), async (req, r
     const kind = req.body?.kind === 'notes' ? 'notes' : 'syllabus';
     const text = await extractPdfText(req.file.buffer, kind);
     if (!text) return res.status(422).json({ error: 'No readable text was found. For scanned/image PDFs, configure GEMINI_API_KEY or OPENAI_API_KEY for OCR.' });
+    const subjects = kind === 'syllabus' ? await parseSyllabusWithAI(text) : [];
     return res.json({
       name: req.file.originalname,
       text,
       textLength: text.length,
-      subjects: parseSyllabusText(text),
+      subjects: subjects.length ? subjects : parseSyllabusText(text),
     });
   } catch (error) {
     console.error('PDF extraction failed:', error);
@@ -604,9 +710,8 @@ app.post('/api/quiz-generate', authMiddleware, async (req, res) => {
   const pool = topics.length ? [...new Set(topics)] : ['Data Structures', 'DBMS', 'Computer Networks'];
   const materials = Array.isArray(req.body?.materials) ? req.body.materials : [];
   const count = Math.max(1, Math.min(10, Number(req.body?.count) || 5));
-  const history = loadQuizHistory();
   const email = req.user?.email || 'anonymous';
-  const used = new Set(history[email] || []);
+  const used = new Set(await loadQuizHistoryForEmail(email));
 
   const materialText = materials
     .map((material) => `${material.topic}: ${String(material.text || '').slice(0, 12000)}`)
@@ -660,8 +765,7 @@ ${materialText || 'No chapter notes supplied.'}`;
         answer: question.answer,
       }));
       if (questions.length) {
-        history[email] = [...new Set([...used, ...questions.map((question) => question.question)])];
-        saveQuizHistory(history);
+        await saveQuizHistoryForEmail(email, [...new Set([...used, ...questions.map((question) => question.question)])]);
         return res.json({ questions });
       }
     }
@@ -752,8 +856,7 @@ ${materialText || 'No chapter notes supplied.'}`;
       answer: template.answer,
     };
   });
-  history[email] = [...new Set([...used, ...questions.map((question) => question.question)])];
-  saveQuizHistory(history);
+  await saveQuizHistoryForEmail(email, [...new Set([...used, ...questions.map((question) => question.question)])]);
   return res.json({ questions });
 });
 
@@ -959,7 +1062,97 @@ app.post('/api/ai-v2', authMiddleware, async (req, res) => {
   }
 });
 
-// Streaming v2: emulate streaming by splitting the full reply into chunks and sending SSE frames. Works with Anthropic or OpenAI (non-streaming) to ensure compatibility.
+function sendSse(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+async function streamOpenAI(prompt, context, res) {
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: 'system', content: 'You are CampusMate AI, a helpful study assistant aware of the user context.' },
+        { role: 'user', content: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` },
+      ],
+      stream: true,
+    }),
+  });
+  if (!response.ok) throw new Error(`OpenAI streaming request failed (${response.status}): ${await response.text()}`);
+  let buffer = '';
+  for await (const chunk of response.body) {
+    buffer += chunk.toString('utf8');
+    const events = buffer.split('\n\n');
+    buffer = events.pop() || '';
+    for (const event of events) {
+      const data = event.replace(/^data:\s*/m, '').trim();
+      if (!data || data === '[DONE]') continue;
+      const payload = JSON.parse(data);
+      const text = payload?.choices?.[0]?.delta?.content;
+      if (text) sendSse(res, { type: 'delta', text });
+    }
+  }
+}
+
+async function streamAnthropic(prompt, context, res) {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-5',
+      max_tokens: 500,
+      stream: true,
+      system: 'You are CampusMate AI, a helpful study assistant aware of the user context.',
+      messages: [{ role: 'user', content: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }],
+    }),
+  });
+  if (!response.ok) throw new Error(`Anthropic streaming request failed (${response.status}): ${await response.text()}`);
+  let buffer = '';
+  for await (const chunk of response.body) {
+    buffer += chunk.toString('utf8');
+    const events = buffer.split('\n\n');
+    buffer = events.pop() || '';
+    for (const event of events) {
+      const data = event.split('\n').find((line) => line.startsWith('data:'))?.replace(/^data:\s*/, '');
+      if (!data) continue;
+      const payload = JSON.parse(data);
+      const text = payload?.type === 'content_block_delta' ? payload?.delta?.text : '';
+      if (text) sendSse(res, { type: 'delta', text });
+    }
+  }
+}
+
+async function streamGemini(prompt, context, res) {
+  const model = (await getGeminiModels())[0];
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(GEMINI_KEY)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: 'You are CampusMate AI, a helpful study assistant aware of the user context.' }] },
+      contents: [{ parts: [{ text: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }] }],
+    }),
+  });
+  if (!response.ok) throw new Error(`Gemini streaming request failed (${response.status}): ${await response.text()}`);
+  let buffer = '';
+  for await (const chunk of response.body) {
+    buffer += chunk.toString('utf8');
+    const events = buffer.split('\n\n');
+    buffer = events.pop() || '';
+    for (const event of events) {
+      const data = event.replace(/^data:\s*/m, '').trim();
+      if (!data) continue;
+      const payload = JSON.parse(data);
+      const text = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '';
+      if (text) sendSse(res, { type: 'delta', text });
+    }
+  }
+}
+
 app.post('/api/ai-stream-v2', authMiddleware, async (req, res) => {
   try {
     const { prompt, context } = req.body || {};
@@ -970,95 +1163,17 @@ app.post('/api/ai-stream-v2', authMiddleware, async (req, res) => {
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
 
-    let finalReply = '';
-
-    if (hasGeminiKey) {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: 'You are CampusMate AI, a helpful study assistant aware of the user context.' }] },
-          contents: [{ parts: [{ text: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }] }],
-        }),
-      });
-      if (!response.ok) {
-        const body = await response.text();
-        res.write(`data: ${JSON.stringify({ type: 'error', status: response.status, body })}\n\n`);
-        return res.end();
-      }
-      const payload = await response.json();
-      finalReply = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('').trim() || '';
-    } else if (process.env.ANTHROPIC_API_KEY) {
-      try {
-        const systemMsg = `You are CampusMate AI, a helpful study assistant aware of the user's tracked subjects, weak topics, and planner.`;
-        const resp = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': process.env.ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify({
-            model: 'claude-sonnet-5',
-            max_tokens: 500,
-            system: systemMsg,
-            messages: [{ role: 'user', content: `${JSON.stringify(context || {})}\n\nUser: ${prompt}` }],
-          }),
-        });
-        if (!resp.ok) {
-          const body = await resp.text();
-          res.write(`data: ${JSON.stringify({ type: 'error', status: resp.status, body })}\n\n`);
-          return res.end();
-        }
-        const payload = await resp.json();
-        finalReply = payload?.content?.map((block) => block?.text || '').join('').trim() || '';
-      } catch (e) {
-        console.error('Anthropic error', e);
-        res.write(`data: ${JSON.stringify({ type: 'error', body: 'Anthropic call failed' })}\n\n`);
-        return res.end();
-      }
-    } else if (hasOpenAIKey) {
-      try {
-        const systemMsg = `You are CampusMate AI, a helpful study assistant aware of the user's tracked subjects, weak topics, and planner.`;
-        const messages = [ { role: 'system', content: systemMsg }, { role: 'user', content: `${JSON.stringify(context||{})}\n\nUser: ${prompt}` } ];
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
-          body: JSON.stringify({ model: OPENAI_MODEL, messages })
-        });
-        if (!response.ok) {
-          const body = await response.text();
-          res.write(`data: ${JSON.stringify({ type: 'error', status: response.status, body })}\n\n`);
-          return res.end();
-        }
-        const payload = await response.json();
-        finalReply = payload?.choices?.[0]?.message?.content || '';
-      } catch (e) {
-        console.error('OpenAI error', e);
-        res.write(`data: ${JSON.stringify({ type: 'error', body: 'OpenAI call failed' })}\n\n`);
-        return res.end();
-      }
-    } else {
-      res.write(`data: ${JSON.stringify({ type: 'error', body: 'No AI provider configured' })}\n\n`);
-      return res.end();
-    }
-
-    if (!finalReply.trim()) {
-      res.write(`data: ${JSON.stringify({ type: 'error', body: 'The AI provider returned an empty response' })}\n\n`);
-      return res.end();
-    }
-
-    // Stream the provider response in small chunks for a natural chat experience.
-    const chunks = finalReply.split(/(\s+)/).filter(Boolean);
-    for (const c of chunks) {
-      await new Promise(r => setTimeout(r, 80));
-      res.write(`data: ${JSON.stringify({ type: 'delta', text: c })}\n\n`);
-    }
-    res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+    if (hasGeminiKey) await streamGemini(prompt, context, res);
+    else if (process.env.ANTHROPIC_API_KEY) await streamAnthropic(prompt, context, res);
+    else if (hasOpenAIKey) await streamOpenAI(prompt, context, res);
+    else throw new Error('No AI provider configured');
+    sendSse(res, { type: 'done' });
     return res.end();
   } catch (e) {
     console.error('Stream v2 error', e);
-    try { res.end(); } catch (e) {}
+    if (!res.headersSent) return res.status(502).json({ error: e.message || 'AI streaming failed' });
+    sendSse(res, { type: 'error', body: e.message || 'AI streaming failed' });
+    return res.end();
   }
 });
 

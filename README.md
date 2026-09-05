@@ -71,3 +71,6 @@ Postgres database. Create a Render Blueprint from the repository, then add
 `GEMINI_API_KEY` (recommended) or `OPENAI_API_KEY` in the service environment.
 Render supplies `DATABASE_URL` and generates `JWT_SECRET` automatically.
 The service runs the Vite build and Express API from the same HTTPS origin.
+`GET /api/ping` is an unauthenticated keep-alive endpoint. On Render's free tier,
+configure UptimeRobot or a GitHub Action to request it every 10 minutes if you
+want to reduce cold starts.
