@@ -70,10 +70,30 @@ async function parseSyllabus(buffer) {
 async function extractPdfText(buffer) {
   const parser = new PDFParse({ data: buffer });
   try {
-    return (await parser.getText())?.text || '';
+    const extracted = (await parser.getText())?.text || '';
+    if (extracted.trim()) return extracted;
+  } catch (error) {
+    console.error('PDF parser text extraction failed; trying raw text fallback:', error);
   } finally {
     await parser.destroy();
   }
+  return extractRawPdfText(buffer);
+}
+
+function extractRawPdfText(buffer) {
+  const source = Buffer.from(buffer).toString('latin1');
+  const strings = [];
+  const textPattern = /\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*T[jJ]/g;
+  let match;
+  while ((match = textPattern.exec(source))) {
+    const value = match[1]
+      .replace(/\\([\\()])/g, '$1')
+      .replace(/\\n/g, ' ')
+      .replace(/\\r/g, ' ')
+      .trim();
+    if (value) strings.push(value);
+  }
+  return strings.join('\n');
 }
 
 function parseSyllabusText(text) {
@@ -331,6 +351,7 @@ app.post('/api/pdf-extract', authMiddleware, upload.single('pdf'), async (req, r
     return res.json({
       name: req.file.originalname,
       text,
+      textLength: text.length,
       subjects: parseSyllabusText(text),
     });
   } catch (error) {
