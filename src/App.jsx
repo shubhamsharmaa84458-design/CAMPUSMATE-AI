@@ -1939,7 +1939,7 @@ function Notes({ data, updateData }) {
   const [chapter, setChapter] = useState("");
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
-  const [showExtractedSyllabus, setShowExtractedSyllabus] = useState(false);
+  const [selectedNote, setSelectedNote] = useState(null);
   const notes = data.notes || [];
 
   async function uploadNote(event) {
@@ -2004,15 +2004,6 @@ function Notes({ data, updateData }) {
           <h1>Chapter Notes</h1>
           <p>Upload chapter PDFs so AI Quiz can create questions from your study material.</p>
         </div>
-        {data.syllabus?.text && (
-          <Button
-            variant="secondary"
-            className="view-extracted-notes-btn"
-            onClick={() => setShowExtractedSyllabus(true)}
-          >
-            <Eye size={15} /> View Extracted Notes
-          </Button>
-        )}
       </div>
       <Card>
         <label htmlFor="note-chapter">Chapter name</label>
@@ -2032,16 +2023,23 @@ function Notes({ data, updateData }) {
               <div><h2>{note.chapter}</h2><p className="small muted">{note.name}</p></div>
               <button className="icon-btn danger-icon" onClick={() => removeNote(note.id)}><Trash2 size={16} /></button>
             </div>
-            <details><summary>View extracted notes</summary><pre>{note.text || "No text was found."}</pre></details>
+            <Button
+              variant="secondary"
+              className="view-extracted-notes-btn"
+              onClick={() => setSelectedNote(note)}
+            >
+              <Eye size={15} /> View Extracted Notes
+            </Button>
           </Card>
         ))}
       </div>
-      {showExtractedSyllabus && data.syllabus?.text && (
+      {selectedNote && (
         <Modal
-          title={data.syllabus.name || "Extracted syllabus notes"}
-          close={() => setShowExtractedSyllabus(false)}
+          title={selectedNote.chapter || "Extracted notes"}
+          close={() => setSelectedNote(null)}
         >
-          <pre className="syllabus-modal-preview">{data.syllabus.text}</pre>
+          <p className="small muted">{selectedNote.name}</p>
+          <pre className="syllabus-modal-preview">{selectedNote.text || "No text was found."}</pre>
         </Modal>
       )}
     </div>
