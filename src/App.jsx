@@ -2263,6 +2263,64 @@ function Quiz({ data, updateData }) {
     }
   }
 
+  function applyQuizMastery(questionSet, answerSet) {
+    const normalize = (value) => String(value || "").trim().toLowerCase();
+    const subjects = data.subjects.map((subject) => ({
+      ...subject,
+      topics: subject.topics.map((topic) => ({ ...topic })),
+    }));
+    let changed = false;
+
+    questionSet.forEach((quizQuestion, index) => {
+      const questionTopic = normalize(quizQuestion.topic);
+      const answer = answerSet[index];
+      if (!questionTopic || !Number.isInteger(answer)) return;
+
+      const exactMatches = [];
+      subjects.forEach((subject) => {
+        subject.topics.forEach((topic) => {
+          const topicName = normalize(topic.name);
+          const subjectTopic = normalize(`${subject.name}: ${topic.name}`);
+          if (questionTopic === topicName || questionTopic === subjectTopic) {
+            exactMatches.push(topic);
+          }
+        });
+      });
+
+      const matchedTopic = exactMatches.length === 1 ? exactMatches[0] : null;
+      if (!matchedTopic) return;
+
+      const correct = answer === quizQuestion.answer;
+      matchedTopic.mastery = Math.max(
+        0,
+        Math.min(100, Number(matchedTopic.mastery) + (correct ? 5 : -5))
+      );
+      changed = true;
+    });
+
+    if (!changed) return;
+
+    const nextData = { ...data, subjects };
+    updateData(nextData);
+    const token = localStorage.getItem("campusmate_token");
+    if (token) {
+      fetch("/api/me/study-data", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `******`,
+        },
+        body: JSON.stringify({
+          subjects,
+          notes: nextData.notes,
+          syllabus: nextData.syllabus || null,
+        }),
+      }).catch((error) => {
+        console.error("Unable to persist quiz mastery:", error);
+      });
+    }
+  }
+
   function renderTopicSelector() {
     return (
       <label className="quiz-topic-selector">
@@ -2303,6 +2361,8 @@ function Quiz({ data, updateData }) {
       const score = Math.round(
         (correct / questions.length) * 100
       );
+
+      applyQuizMastery(questions, newAnswers);
 
       const attempt = {
         id: uid(),
