@@ -2288,53 +2288,6 @@ function Quiz({ data, updateData }) {
     }
   }
 
-  function applyQuizMastery(questionSet, answerSet, currentData = data) {
-    const normalize = (value) => String(value || "").trim().toLowerCase();
-    const subjects = currentData.subjects.map((subject) => ({
-      ...subject,
-      topics: subject.topics.map((topic) => ({ ...topic })),
-    }));
-    let changed = false;
-    const selectedTopicParts = selectedTopic.split(":");
-    const selectedTopicId = selectedTopicParts.length === 2 ? selectedTopicParts[1] : "";
-
-    questionSet.forEach((quizQuestion, index) => {
-      const questionTopic = normalize(quizQuestion.topic);
-      const answer = answerSet[index];
-      if (!questionTopic || !Number.isInteger(answer)) return;
-
-      const matches = [];
-      subjects.forEach((subject) => {
-        subject.topics.forEach((topic) => {
-          const topicName = normalize(topic.name);
-          const subjectTopic = normalize(`${subject.name}: ${topic.name}`);
-          if (
-            questionTopic === topicName
-            || questionTopic === subjectTopic
-            || questionTopic.endsWith(`: ${topicName}`)
-            || questionTopic.includes(topicName)
-          ) {
-            matches.push(topic);
-          }
-        });
-      });
-
-      const matchedTopic = matches.length === 1
-        ? matches[0]
-        : subjects.flatMap((subject) => subject.topics).find((topic) => topic.id === selectedTopicId);
-      if (!matchedTopic) return;
-
-      const correct = answer === quizQuestion.answer;
-      matchedTopic.mastery = Math.max(
-        0,
-        Math.min(100, Number(matchedTopic.mastery) + (correct ? 5 : -5))
-      );
-      changed = true;
-    });
-
-    return changed ? subjects : currentData.subjects;
-  }
-
   function renderTopicSelector() {
     return (
       <label className="quiz-topic-selector">
@@ -2384,31 +2337,10 @@ function Quiz({ data, updateData }) {
         total: questions.length,
       };
 
-      const subjects = applyQuizMastery(questions, newAnswers);
-      const nextData = {
+      updateData({
         ...data,
-        subjects,
         attempts: [...data.attempts, attempt],
-      };
-      updateData(nextData);
-
-      const token = localStorage.getItem("campusmate_token");
-      if (token) {
-        fetch("/api/me/study-data", {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `******`,
-          },
-          body: JSON.stringify({
-            subjects,
-            notes: nextData.notes,
-            syllabus: nextData.syllabus || null,
-          }),
-        }).catch((error) => {
-          console.error("Unable to persist quiz mastery:", error);
-        });
-      }
+      });
 
       setFinished(true);
       setReviewMode(false);
